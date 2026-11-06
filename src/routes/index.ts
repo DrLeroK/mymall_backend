@@ -30,5 +30,6 @@ router.use('/chat', chatRoutes);
 router.use('/disputes', disputeRoutes);
 router.use('/addresses', addressRoutes);
 router.use('/notifications', alertRoutes);
+router.use('/alerts', alertRoutes);
 
 export default router;

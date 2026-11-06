@@ -9,7 +9,7 @@ export class StorefrontController {
    */
   static async marketplaceSearch(req: Request, res: Response) {
     try {
-      const { q, query, category, minPrice, maxPrice, inStockOnly, type = 'all' } = req.query;
+      const { q, query, category, minPrice, maxPrice, inStockOnly, type = 'all', page: pageQuery, limit: limitQuery } = req.query;
 
       const rawQuery = (q || query) as string | undefined;
       const queryStr = rawQuery ? rawQuery.trim() : undefined;
@@ -18,24 +18,40 @@ export class StorefrontController {
       const maxP = maxPrice ? parseFloat(maxPrice as string) : undefined;
       const inStock = inStockOnly === 'true';
 
+      const page = pageQuery ? Math.max(1, parseInt(pageQuery as string, 10)) : 1;
+      const limit = limitQuery ? Math.max(1, parseInt(limitQuery as string, 10)) : 12;
+      const offset = (page - 1) * limit;
+
       let stores: any[] = [];
       let products: any[] = [];
+      let totalStores = 0;
+      let totalProducts = 0;
 
       if (type === 'all' || type === 'stores') {
-        stores = await SearchService.searchStores(queryStr, categoryStr);
+        const storeRes = await SearchService.searchStores(queryStr, categoryStr, limit, offset);
+        stores = storeRes.stores;
+        totalStores = storeRes.total;
       }
 
       if (type === 'all' || type === 'products') {
-        products = await SearchService.searchProducts(queryStr, categoryStr, minP, maxP, inStock);
+        const prodRes = await SearchService.searchProducts(queryStr, categoryStr, minP, maxP, inStock, limit, offset);
+        products = prodRes.products;
+        totalProducts = prodRes.total;
       }
+
+      const activeTotal = type === 'stores' ? totalStores : totalProducts;
 
       return res.json({
         success: true,
         query: queryStr || null,
         counts: {
-          stores: stores.length,
-          products: products.length,
+          stores: totalStores || stores.length,
+          products: totalProducts || products.length,
         },
+        page,
+        limit,
+        total: activeTotal,
+        totalPages: Math.ceil(activeTotal / limit) || 1,
         stores,
         products,
       });
@@ -161,7 +177,7 @@ export class StorefrontController {
   static async getCatalog(req: Request, res: Response) {
     try {
       const { slug } = req.params;
-      const { category, search, minPrice, maxPrice, inStockOnly } = req.query;
+      const { category, search, minPrice, maxPrice, inStockOnly, page: pageQuery, limit: limitQuery } = req.query;
 
       const store = await prisma.store.findUnique({
         where: { slug: slug.toLowerCase() },
@@ -175,6 +191,7 @@ export class StorefrontController {
       const whereClause: any = {
         storeId: store.id,
         isActive: true,
+        isOnlineVisible: true,
       };
 
       // Auto-hide out of stock products if setting enabled or query requested
@@ -202,15 +219,36 @@ export class StorefrontController {
         if (maxPrice) whereClause.sellingPrice.lte = parseFloat(maxPrice as string);
       }
 
-      const products = await prisma.product.findMany({
-        where: whereClause,
-        include: {
-          category: true,
-          variants: true,
-          reviews: { select: { rating: true } },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
+      const page = pageQuery ? Math.max(1, parseInt(pageQuery as string, 10)) : null;
+      const limit = limitQuery ? Math.max(1, parseInt(limitQuery as string, 10)) : null;
+
+      const total = await prisma.product.count({ where: whereClause });
+
+      let products;
+      if (page && limit) {
+        const skip = (page - 1) * limit;
+        products = await prisma.product.findMany({
+          where: whereClause,
+          include: {
+            category: true,
+            variants: true,
+            reviews: { select: { rating: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+        });
+      } else {
+        products = await prisma.product.findMany({
+          where: whereClause,
+          include: {
+            category: true,
+            variants: true,
+            reviews: { select: { rating: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+      }
 
       // Calculate average rating
       const formattedProducts = products.map((p) => {
@@ -225,7 +263,15 @@ export class StorefrontController {
         };
       });
 
-      return res.json({ success: true, count: formattedProducts.length, products: formattedProducts });
+      return res.json({
+        success: true,
+        count: formattedProducts.length,
+        total,
+        page: page || 1,
+        limit: limit || total,
+        totalPages: limit ? Math.ceil(total / limit) : 1,
+        products: formattedProducts,
+      });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }
@@ -242,7 +288,7 @@ export class StorefrontController {
       if (!store) return res.status(404).json({ success: false, message: 'Store not found' });
 
       const product = await prisma.product.findFirst({
-        where: { id: parseInt(productId, 10), storeId: store.id, isActive: true },
+        where: { id: parseInt(productId, 10), storeId: store.id, isActive: true, isOnlineVisible: true },
         include: {
           category: true,
           variants: true,

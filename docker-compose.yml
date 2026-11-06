@@ -1,10 +1,10 @@
 # ==============================================================================
-# Docker Compose for MyMall Multi-Tenant E-Commerce Backend Platform
+# Docker Compose for MyMall Multi-Tenant SaaS E-Commerce Backend
 # ==============================================================================
 
 services:
   # ============================================================================
-  # MyMall Express Backend Application (REST APIs, Socket.io, Cron Workers)
+  # MyMall Express Backend (REST API, WebSockets, Socket.io)
   # ============================================================================
   app:
     build:
@@ -22,13 +22,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - uploads_data:/app/uploads
     networks:
       - mymall_network
 
   # ============================================================================
-  # PostgreSQL Database (Multi-Tenant Store, Inventory, Orders, Subscriptions)
+  # PostgreSQL Database Service
   # ============================================================================
   postgres:
     image: postgres:16-alpine
@@ -39,7 +37,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-mymall_db}
     ports:
-      - "${DOCKER_POSTGRES_PORT:-5434}:5432"
+      - "${DOCKER_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -50,14 +48,26 @@ services:
     networks:
       - mymall_network
 
+  # ============================================================================
+  # Mailpit - Email & SMTP Testing Server (Zero Auth in Dev)
+  # Web UI: http://localhost:8025 | SMTP Port: localhost:1025
+  # ============================================================================
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: mymall_backend_mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025" # Web UI
+      - "1025:1025" # SMTP port
+    networks:
+      - mymall_network
+
 # ==============================================================================
 # Persistent Volumes & Network Definitions
 # ==============================================================================
 volumes:
   postgres_data:
     name: mymall_postgres_data
-  uploads_data:
-    name: mymall_uploads_data
 
 networks:
   mymall_network:

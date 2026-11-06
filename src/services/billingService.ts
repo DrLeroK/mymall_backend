@@ -23,19 +23,22 @@ export class BillingService {
       return { allowed: false, currentCount: 0, maxProducts: 0, reason: 'Store not found.' };
     }
 
-    // Require active approved subscription
-    const hasActiveSubscription = store.subscriptions && store.subscriptions.length > 0;
+    // Allow if under trial or has active subscription
+    const now = new Date();
+    const isUnderTrial = (store.isTrial && store.trialEndsAt && now <= store.trialEndsAt) || (store.subscriptionEndsAt && now <= store.subscriptionEndsAt);
+    const hasActiveSubscription = (store.subscriptions && store.subscriptions.length > 0) || isUnderTrial;
+
     if (!hasActiveSubscription) {
       return {
         allowed: false,
         currentCount: 0,
         maxProducts: 0,
-        reason: 'Active subscription required. Please pay for a subscription plan before adding products.',
+        reason: 'Active subscription required. Please subscribe to a plan to add products.',
       };
     }
 
     const currentCount = await prisma.product.count({ where: { storeId } });
-    const maxProducts = store?.plan?.maxProducts || 100;
+    const maxProducts = store?.plan?.maxProducts || 25;
 
     return {
       allowed: currentCount < maxProducts,
@@ -53,8 +56,8 @@ export class BillingService {
       include: { plan: true },
     });
 
-    const currentCount = await prisma.user.count({ where: { storeId } });
-    const maxStaff = store?.plan?.maxStaff || 3;
+    const currentCount = await prisma.storeStaffMember.count({ where: { storeId, isActive: true } });
+    const maxStaff = store?.plan?.maxStaff || 2;
 
     return {
       allowed: currentCount < maxStaff,
@@ -95,6 +98,32 @@ export class BillingService {
       default:
         return 30;
     }
+  }
+
+  /**
+   * Helper: Calculate upgrade information and resulting expiry date
+   */
+  static calculateUpgradeDetails(currentStore: any, newPlanId: number, cycle: BillingCycle) {
+    const daysGranted = this.getCycleDays(cycle);
+    const now = new Date();
+    const isUpgrade = Boolean(currentStore.currentPlanId && currentStore.currentPlanId !== newPlanId);
+    const previousPlanId = currentStore.currentPlanId || null;
+
+    let baseDate = now;
+    // If store currently has an active non-trial subscription that hasn't expired, carry over remaining days
+    if (currentStore.subscriptionEndsAt && new Date(currentStore.subscriptionEndsAt) > now && !currentStore.isTrial) {
+      baseDate = new Date(currentStore.subscriptionEndsAt);
+    }
+
+    const newEndDate = new Date(baseDate);
+    newEndDate.setDate(newEndDate.getDate() + daysGranted);
+
+    return {
+      isUpgrade,
+      previousPlanId,
+      daysGranted,
+      newEndDate,
+    };
   }
 
   /**

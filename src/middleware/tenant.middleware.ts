@@ -34,6 +34,10 @@ export async function tenantIsolation(req: Request, res: Response, next: NextFun
     });
 
     if (!store) {
+      if (req.user && req.user.role === Role.CUSTOMER) {
+        req.storeId = undefined;
+        return next();
+      }
       return res.status(404).json({
         success: false,
         message: `Store with ID ${storeId} was not found.`,
@@ -41,16 +45,39 @@ export async function tenantIsolation(req: Request, res: Response, next: NextFun
     }
 
     // Verify tenant permission for non-superadmin users
-    if (
-      req.user &&
-      req.user.role !== Role.SUPER_ADMIN &&
-      req.user.storeId &&
-      req.user.storeId !== storeId
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: 'Cross-Tenant Access Forbidden. You are not authorized to access this store.',
-      });
+    if (req.user && req.user.role !== Role.SUPER_ADMIN) {
+      if (req.user.role === Role.STORE_OWNER) {
+        if (store.ownerId !== req.user.id) {
+          // Check if owner is also a member of another store
+          const membership = await prisma.storeStaffMember.findUnique({
+            where: { storeId_userId: { storeId, userId: req.user.id } },
+          });
+          if (!membership || !membership.isActive) {
+            return res.status(403).json({
+              success: false,
+              message: 'Cross-Tenant Access Forbidden. You do not own or belong to this store.',
+            });
+          }
+        }
+      } else if (req.user.role === Role.STORE_STAFF) {
+        const membership = await prisma.storeStaffMember.findUnique({
+          where: { storeId_userId: { storeId, userId: req.user.id } },
+        });
+
+        if (!membership || !membership.isActive) {
+          return res.status(403).json({
+            success: false,
+            message: 'Cross-Tenant Access Forbidden. You are not an active staff member of this store.',
+          });
+        }
+
+        req.user.staffRole = membership.staffRole;
+        try {
+          req.user.permissions = JSON.parse(membership.permissions || '[]');
+        } catch {
+          req.user.permissions = [];
+        }
+      }
     }
 
     req.storeId = store.id;

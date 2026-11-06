@@ -4,6 +4,8 @@ import { BillingCycle, PaymentStatus, StoreStatus } from '@prisma/client';
 import { notifyStore, notifySuperAdmin } from '../sockets/socket';
 import { BillingService } from '../services/billingService';
 import { ChapaService } from '../services/chapaService';
+import { StorageService } from '../services/storageService';
+import { ReceiptService } from '../services/receiptService';
 
 export class BillingController {
   // ==========================================
@@ -269,13 +271,22 @@ export class BillingController {
         return res.status(404).json({ success: false, message: 'Selected plan not found.' });
       }
 
-      const paymentProofUrl = `/uploads/screenshots/${req.file.filename}`;
+      const store = await prisma.store.findUnique({ where: { id: storeId } });
+      if (!store) {
+        return res.status(404).json({ success: false, message: 'Store not found.' });
+      }
+
+      const paymentProofUrl = await StorageService.uploadFile(req.file, 'screenshots');
       const amount = BillingService.getCyclePrice(plan, billingCycle as BillingCycle);
+      const upgradeDetails = BillingService.calculateUpgradeDetails(store, plan.id, billingCycle as BillingCycle);
 
       const subscription = await prisma.storeSubscription.create({
         data: {
           storeId,
           planId: plan.id,
+          previousPlanId: upgradeDetails.previousPlanId,
+          daysGranted: upgradeDetails.daysGranted,
+          isUpgrade: upgradeDetails.isUpgrade,
           billingCycle: billingCycle as BillingCycle,
           amount,
           paymentMethod: 'SCREENSHOT',
@@ -330,12 +341,16 @@ export class BillingController {
 
       const amount = BillingService.getCyclePrice(plan, billingCycle as BillingCycle);
       const txRef = `SUB-${storeId}-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+      const upgradeDetails = BillingService.calculateUpgradeDetails(store, plan.id, billingCycle as BillingCycle);
 
-      // Create pending subscription record with chapa txRef
+      // Create pending subscription record with chapa txRef and upgrade details
       const subscription = await prisma.storeSubscription.create({
         data: {
           storeId,
           planId: plan.id,
+          previousPlanId: upgradeDetails.previousPlanId,
+          daysGranted: upgradeDetails.daysGranted,
+          isUpgrade: upgradeDetails.isUpgrade,
           billingCycle: billingCycle as BillingCycle,
           amount,
           paymentMethod: 'CHAPA',
@@ -348,16 +363,35 @@ export class BillingController {
       const [firstName, ...rest] = (user.name || 'Merchant').split(' ');
       const lastName = rest.join(' ') || 'Owner';
 
-      const emailToUse = user.email.includes('@example.com') ? (process.env.SMTP_USER || 'customer@mymall.com') : user.email;
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const cleanUserEmail = (user.email || '').replace(/['"]/g, '').trim();
+      const bodyEmail = (req.body.email || '').replace(/['"]/g, '').trim();
+      const smtpEmail = (process.env.SMTP_USER || '').replace(/['"]/g, '').trim();
+
+      // Check if user email is a real, valid public domain email
+      const isPublicDomain = (em: string) => {
+        if (!emailRegex.test(em)) return false;
+        const lower = em.toLowerCase();
+        // Disallow internal / test domains that Chapa rejects
+        return !lower.endsWith('.local') && !lower.endsWith('.et') && !lower.endsWith('.test') && !lower.endsWith('@example.com');
+      };
+
+      const emailToUse = (bodyEmail && isPublicDomain(bodyEmail))
+        ? bodyEmail
+        : (cleanUserEmail && isPublicDomain(cleanUserEmail))
+          ? cleanUserEmail
+          : (smtpEmail && isPublicDomain(smtpEmail))
+            ? smtpEmail
+            : 'abuabat521@gmail.com';
 
       const finalReturnUrl = returnUrl
         ? `${returnUrl}${returnUrl.includes('?') ? '&' : '?'}txRef=${txRef}`
-        : `${process.env.FRONTEND_URL || 'http://localhost:3000'}/merchant/billing?payment=chapa_success&txRef=${txRef}`;
+        : `${process.env.FRONTEND_URL || 'http://localhost:3003'}/merchant/billing?payment=chapa_success&txRef=${txRef}`;
 
       // Initialize with Chapa
       const chapaRes = await ChapaService.initializePayment({
         amount,
-        currency: store.currency === 'USD' ? 'USD' : 'ETB',
+        currency: 'ETB',
         email: emailToUse,
         firstName,
         lastName,
@@ -391,20 +425,75 @@ export class BillingController {
     try {
       const { txRef } = req.params;
 
-      const subscription = await prisma.storeSubscription.findUnique({
+      let subscription = await prisma.storeSubscription.findUnique({
         where: { chapaTxRef: txRef },
         include: { store: true, plan: true },
       });
+
+      // If not found by exact txRef, search by storeId from auth/context or query
+      if (!subscription) {
+        const queryStoreId = req.query.storeId ? parseInt(req.query.storeId as string, 10) : undefined;
+        const storeId = req.storeId || req.user?.storeId || queryStoreId;
+
+        if (storeId) {
+          subscription = await prisma.storeSubscription.findFirst({
+            where: { storeId, paymentMethod: 'CHAPA', status: PaymentStatus.PENDING_APPROVAL },
+            orderBy: { createdAt: 'desc' },
+            include: { store: true, plan: true },
+          });
+        }
+      }
+
+      // If still not found, search by user's owned stores
+      if (!subscription && req.user?.id) {
+        const ownedStores = await prisma.store.findMany({
+          where: { ownerId: req.user.id },
+          select: { id: true },
+        });
+        const storeIds = ownedStores.map((s) => s.id);
+        if (storeIds.length > 0) {
+          subscription = await prisma.storeSubscription.findFirst({
+            where: { storeId: { in: storeIds }, paymentMethod: 'CHAPA', status: PaymentStatus.PENDING_APPROVAL },
+            orderBy: { createdAt: 'desc' },
+            include: { store: true, plan: true },
+          });
+        }
+      }
 
       if (!subscription) {
         return res.status(404).json({ success: false, message: 'Subscription transaction not found.' });
       }
 
+      const actualTxRef = subscription.chapaTxRef || txRef;
+
       if (subscription.status === PaymentStatus.APPROVED) {
+        // If approved but missing digital receipt file, generate and save it now
+        if (!subscription.paymentProofUrl || subscription.paymentProofUrl === 'CHAPA_GATEWAY') {
+          try {
+            const invoiceNumber = `INV-MALL-${subscription.storeId}-${subscription.id}`;
+            const receiptUrl = await ReceiptService.generateSubscriptionReceiptFile({
+              storeName: subscription.store.name,
+              planName: subscription.plan.name,
+              amount: Number(subscription.amount),
+              currency: subscription.store.currency || 'ETB',
+              invoiceNumber,
+              txRef: actualTxRef,
+              paymentDate: subscription.startDate || subscription.createdAt,
+              isUpgrade: subscription.isUpgrade,
+              ownerName: subscription.store.name,
+              ownerEmail: subscription.store.contactEmail || undefined,
+            });
+            await prisma.storeSubscription.update({
+              where: { id: subscription.id },
+              data: { paymentProofUrl: receiptUrl },
+            });
+            subscription.paymentProofUrl = receiptUrl;
+          } catch {}
+        }
         return res.json({ success: true, message: 'Subscription already activated.', subscription });
       }
 
-      const chapaVerification = await ChapaService.verifyPayment(txRef);
+      const chapaVerification = await ChapaService.verifyPayment(actualTxRef);
       const isSimulate = process.env.NODE_ENV !== 'production' && req.query.simulateSuccess === 'true';
 
       if (!isSimulate && (!chapaVerification.success || chapaVerification.status !== 'success')) {
@@ -412,17 +501,44 @@ export class BillingController {
       }
 
       // Activate Subscription Immediately
+      const store = await prisma.store.findUnique({ where: { id: subscription.storeId } });
+      const upgradeDetails = BillingService.calculateUpgradeDetails(
+        store || {},
+        subscription.planId,
+        subscription.billingCycle
+      );
       const now = new Date();
-      const cycleDays = BillingService.getCycleDays(subscription.billingCycle);
-      const endDate = new Date(now);
-      endDate.setDate(endDate.getDate() + cycleDays);
+      const invoiceNumber = `INV-MALL-${subscription.storeId}-${Date.now().toString().slice(-6)}`;
+
+      // Generate verifiable digital receipt document and store URL in paymentProofUrl
+      let receiptUrl = 'CHAPA_GATEWAY';
+      try {
+        receiptUrl = await ReceiptService.generateSubscriptionReceiptFile({
+          storeName: subscription.store.name,
+          planName: subscription.plan.name,
+          amount: Number(subscription.amount),
+          currency: subscription.store.currency || 'ETB',
+          invoiceNumber,
+          txRef: actualTxRef,
+          paymentDate: now,
+          isUpgrade: upgradeDetails.isUpgrade,
+          ownerName: subscription.store.name,
+          ownerEmail: subscription.store.contactEmail || undefined,
+        });
+      } catch (receiptErr: any) {
+        console.warn('Could not generate digital receipt file:', receiptErr.message);
+      }
 
       const updatedSub = await prisma.storeSubscription.update({
         where: { id: subscription.id },
         data: {
           status: PaymentStatus.APPROVED,
           startDate: now,
-          endDate,
+          endDate: upgradeDetails.newEndDate,
+          daysGranted: upgradeDetails.daysGranted,
+          isUpgrade: upgradeDetails.isUpgrade,
+          previousPlanId: upgradeDetails.previousPlanId,
+          paymentProofUrl: receiptUrl,
           adminNotes: 'Automated instant activation via Chapa payment gateway.',
         },
       });
@@ -433,27 +549,43 @@ export class BillingController {
         data: {
           status: StoreStatus.ACTIVE,
           currentPlanId: subscription.planId,
-          subscriptionEndsAt: endDate,
+          isTrial: false,
+          subscriptionEndsAt: upgradeDetails.newEndDate,
         },
       });
 
       // Generate Invoice
-      const invoiceNumber = `INV-MALL-${subscription.storeId}-${Date.now().toString().slice(-6)}`;
       const invoice = await prisma.invoice.create({
         data: {
           invoiceNumber,
           storeId: subscription.storeId,
           subscriptionId: subscription.id,
           amount: subscription.amount,
-          currency: subscription.store.currency,
+          currency: subscription.store.currency || 'ETB',
           status: 'PAID',
           paidAt: now,
         },
       });
 
+      // Create Store Alert
+      await prisma.alert.create({
+        data: {
+          storeId: subscription.storeId,
+          type: 'PAYMENT_SUBMITTED',
+          title: upgradeDetails.isUpgrade
+            ? `🎉 Upgraded to ${subscription.plan.name}!`
+            : `Subscription Activated: ${subscription.plan.name}`,
+          message: upgradeDetails.isUpgrade
+            ? `Your store has been upgraded to ${subscription.plan.name} with ${upgradeDetails.daysGranted} days access! Valid until ${upgradeDetails.newEndDate.toISOString().split('T')[0]}.`
+            : `Your store subscription for ${subscription.plan.name} (${upgradeDetails.daysGranted} days) is now active until ${upgradeDetails.newEndDate.toISOString().split('T')[0]}.`,
+        },
+      });
+
       notifyStore(subscription.storeId, 'subscription:approved', {
         planName: subscription.plan.name,
-        endDate,
+        endDate: upgradeDetails.newEndDate,
+        daysGranted: upgradeDetails.daysGranted,
+        isUpgrade: upgradeDetails.isUpgrade,
         invoiceNumber,
       });
 
@@ -477,11 +609,16 @@ export class BillingController {
    */
   static async listAdminVerifications(req: Request, res: Response) {
     try {
-      const status = (req.query.status as PaymentStatus) || PaymentStatus.PENDING_APPROVAL;
+      const statusParam = req.query.status as string | undefined;
+      const whereClause: any = {};
+      if (statusParam && statusParam.toUpperCase() !== 'ALL') {
+        whereClause.status = statusParam as PaymentStatus;
+      } else if (!statusParam) {
+        whereClause.status = PaymentStatus.PENDING_APPROVAL;
+      }
+
       const verifications = await prisma.storeSubscription.findMany({
-        where: {
-          status,
-        },
+        where: whereClause,
         include: {
           store: {
             include: {
@@ -491,11 +628,41 @@ export class BillingController {
             },
           },
           plan: true,
+          invoices: true,
         },
         orderBy: { createdAt: 'desc' },
       });
 
-      return res.json({ success: true, verifications });
+      // Calculate platform approved subscription income metrics
+      const approvedSubs = await prisma.storeSubscription.findMany({
+        where: { status: PaymentStatus.APPROVED },
+        select: { amount: true, paymentMethod: true },
+      });
+
+      let totalIncome = 0;
+      let chapaIncome = 0;
+      let bankIncome = 0;
+
+      approvedSubs.forEach((sub) => {
+        const amt = Number(sub.amount) || 0;
+        totalIncome += amt;
+        if (sub.paymentMethod === 'CHAPA') {
+          chapaIncome += amt;
+        } else {
+          bankIncome += amt;
+        }
+      });
+
+      return res.json({
+        success: true,
+        verifications,
+        summary: {
+          totalIncome: Math.round(totalIncome * 100) / 100,
+          chapaIncome: Math.round(chapaIncome * 100) / 100,
+          bankIncome: Math.round(bankIncome * 100) / 100,
+          approvedCount: approvedSubs.length,
+        },
+      });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }
@@ -525,20 +692,47 @@ export class BillingController {
       const adminId = req.user!.id;
 
       if (action === 'APPROVE') {
+        const store = await prisma.store.findUnique({ where: { id: subscription.storeId } });
+        const upgradeDetails = BillingService.calculateUpgradeDetails(
+          store || {},
+          subscription.planId,
+          subscription.billingCycle
+        );
         const now = new Date();
-        const daysToAdd = BillingService.getCycleDays(subscription.billingCycle);
 
-        const startDate = now;
-        const endDate = new Date(now);
-        endDate.setDate(endDate.getDate() + daysToAdd);
+        const invoiceNumber = `INV-MALL-${subscription.storeId}-${Date.now().toString().slice(-6)}`;
+
+        let receiptUrl = subscription.paymentProofUrl;
+        if (!receiptUrl || receiptUrl === 'CHAPA_GATEWAY' || subscription.paymentMethod === 'CHAPA') {
+          try {
+            receiptUrl = await ReceiptService.generateSubscriptionReceiptFile({
+              storeName: subscription.store.name,
+              planName: subscription.plan.name,
+              amount: Number(subscription.amount),
+              currency: subscription.store.currency || 'ETB',
+              invoiceNumber,
+              txRef: subscription.chapaTxRef || `SUB-${subscription.storeId}-${Date.now()}`,
+              paymentDate: now,
+              isUpgrade: upgradeDetails.isUpgrade,
+              ownerName: subscription.store.name,
+              ownerEmail: subscription.store.contactEmail || undefined,
+            });
+          } catch (err: any) {
+            console.warn('Could not generate receipt file during admin approval:', err.message);
+          }
+        }
 
         // Update Subscription record
         const updatedSub = await prisma.storeSubscription.update({
           where: { id: subscriptionId },
           data: {
             status: PaymentStatus.APPROVED,
-            startDate,
-            endDate,
+            startDate: now,
+            endDate: upgradeDetails.newEndDate,
+            daysGranted: upgradeDetails.daysGranted,
+            isUpgrade: upgradeDetails.isUpgrade,
+            previousPlanId: upgradeDetails.previousPlanId,
+            paymentProofUrl: receiptUrl,
             adminNotes,
             reviewedById: adminId,
           },
@@ -550,27 +744,43 @@ export class BillingController {
           data: {
             status: StoreStatus.ACTIVE,
             currentPlanId: subscription.planId,
-            subscriptionEndsAt: endDate,
+            isTrial: false,
+            subscriptionEndsAt: upgradeDetails.newEndDate,
           },
         });
 
         // Generate Invoice
-        const invoiceNumber = `INV-MALL-${subscription.storeId}-${Date.now().toString().slice(-6)}`;
         const invoice = await prisma.invoice.create({
           data: {
             invoiceNumber,
             storeId: subscription.storeId,
             subscriptionId: subscription.id,
             amount: subscription.amount,
-            currency: subscription.store.currency,
+            currency: subscription.store.currency || 'ETB',
             status: 'PAID',
             paidAt: now,
           },
         });
 
+        // Create Store Alert
+        await prisma.alert.create({
+          data: {
+            storeId: subscription.storeId,
+            type: 'PAYMENT_SUBMITTED',
+            title: upgradeDetails.isUpgrade
+              ? `🎉 Upgraded to ${subscription.plan.name}!`
+              : `Subscription Approved: ${subscription.plan.name}`,
+            message: upgradeDetails.isUpgrade
+              ? `Your store has been upgraded to ${subscription.plan.name} with ${upgradeDetails.daysGranted} days access! Valid until ${upgradeDetails.newEndDate.toISOString().split('T')[0]}.`
+              : `Your subscription proof for ${subscription.plan.name} (${upgradeDetails.daysGranted} days) was verified and approved by admin. Active until ${upgradeDetails.newEndDate.toISOString().split('T')[0]}.`,
+          },
+        });
+
         notifyStore(subscription.storeId, 'subscription:approved', {
           planName: subscription.plan.name,
-          endDate,
+          endDate: upgradeDetails.newEndDate,
+          daysGranted: upgradeDetails.daysGranted,
+          isUpgrade: upgradeDetails.isUpgrade,
           invoiceNumber,
         });
 
@@ -619,11 +829,259 @@ export class BillingController {
 
       const subscriptions = await prisma.storeSubscription.findMany({
         where: { storeId },
-        include: { plan: true },
+        include: { plan: true, previousPlan: true, invoices: true },
         orderBy: { createdAt: 'desc' },
       });
 
       return res.json({ success: true, invoices, subscriptions });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  /**
+   * Get Store Subscription History & Active Plan Details (Store Owner & Staff)
+   */
+  static async getSubscriptionHistory(req: Request, res: Response) {
+    try {
+      const storeId = req.storeId!;
+
+      const store = await prisma.store.findUnique({
+        where: { id: storeId },
+        include: {
+          plan: true,
+        },
+      });
+
+      if (!store) {
+        return res.status(404).json({ success: false, message: 'Store not found.' });
+      }
+
+      // Fetch all subscriptions in reverse chronological order
+      const subscriptions = await prisma.storeSubscription.findMany({
+        where: { storeId },
+        include: {
+          plan: true,
+          previousPlan: true,
+          invoices: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      // Find currently active subscription (approved and ending in the future)
+      const now = new Date();
+      const activeSubscription = subscriptions.find(
+        (sub) => sub.status === PaymentStatus.APPROVED && sub.endDate && new Date(sub.endDate) > now
+      ) || null;
+
+      // Calculate days remaining
+      let daysRemaining: number | null = null;
+      const endsAt = store.subscriptionEndsAt || (activeSubscription ? activeSubscription.endDate : null);
+      if (endsAt) {
+        const diffMs = new Date(endsAt).getTime() - now.getTime();
+        daysRemaining = Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+      }
+
+      return res.json({
+        success: true,
+        store: {
+          id: store.id,
+          name: store.name,
+          status: store.status,
+          currentPlanId: store.currentPlanId,
+          plan: store.plan,
+          isTrial: store.isTrial,
+          trialEndsAt: store.trialEndsAt,
+          subscriptionEndsAt: store.subscriptionEndsAt,
+          daysRemaining,
+        },
+        activeSubscription: activeSubscription
+          ? {
+              id: activeSubscription.id,
+              plan: activeSubscription.plan,
+              previousPlan: activeSubscription.previousPlan,
+              isUpgrade: activeSubscription.isUpgrade,
+              daysGranted: activeSubscription.daysGranted,
+              billingCycle: activeSubscription.billingCycle,
+              startDate: activeSubscription.startDate,
+              endDate: activeSubscription.endDate,
+              paymentMethod: activeSubscription.paymentMethod,
+              amount: activeSubscription.amount,
+            }
+          : null,
+        subscriptions,
+      });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  /**
+   * Accounting Ledger: Complete Credits & Debits Ledger for Store Accountant
+   */
+  static async getAccountingLedger(req: Request, res: Response) {
+    try {
+      const storeId = req.storeId!;
+      const filterType = ((req.query.type as string) || 'ALL').toUpperCase();
+
+      // 1. Fetch Online Orders (Credits: customer payments received)
+      const orders = await prisma.order.findMany({
+        where: {
+          storeId,
+          status: { in: ['COMPLETED', 'SHIPPED', 'PAID', 'PROCESSING', 'READY_FOR_PICKUP'] as any },
+        },
+        include: {
+          items: {
+            include: {
+              product: { select: { costPrice: true, name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      // 2. Fetch Offline POS Sales (Credits: in-store sales)
+      const posSales = await prisma.pOSSale.findMany({
+        where: { storeId },
+        include: {
+          cashier: { select: { name: true } },
+          items: {
+            include: {
+              product: { select: { costPrice: true, name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      // 3. Fetch Store Subscriptions & Invoices (Debits: platform subscription overhead expenses)
+      const invoices = await prisma.invoice.findMany({
+        where: { storeId },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      // Construct Ledger Entries
+      const ledgerEntries: {
+        id: string;
+        date: Date;
+        type: 'CREDIT' | 'DEBIT';
+        category: 'ONLINE_SALE' | 'POS_SALE' | 'COGS' | 'SUBSCRIPTION_FEE' | 'REFUND';
+        reference: string;
+        description: string;
+        amount: number;
+        paymentMethod: string;
+        status: string;
+      }[] = [];
+
+      let totalCredits = 0;
+      let totalDebits = 0;
+
+      // Online Sales -> Credits & Product Cost -> Debits
+      for (const o of orders) {
+        const orderAmount = Number(o.totalAmount);
+        totalCredits += orderAmount;
+        ledgerEntries.push({
+          id: `ord_${o.id}`,
+          date: o.createdAt,
+          type: 'CREDIT',
+          category: 'ONLINE_SALE',
+          reference: o.orderNumber,
+          description: `Online Order Revenue (${o.customerName})`,
+          amount: orderAmount,
+          paymentMethod: o.paymentMethod,
+          status: o.status,
+        });
+
+        // Calculate Cost of Goods Sold (COGS) as Debit entry
+        const cogs = o.items.reduce((acc: number, it: any) => acc + Number(it.product.costPrice || 0) * it.quantity, 0);
+        if (cogs > 0) {
+          totalDebits += cogs;
+          ledgerEntries.push({
+            id: `cogs_ord_${o.id}`,
+            date: o.createdAt,
+            type: 'DEBIT',
+            category: 'COGS',
+            reference: `COGS-${o.orderNumber}`,
+            description: `Inventory Cost for Order #${o.orderNumber}`,
+            amount: Number(cogs.toFixed(2)),
+            paymentMethod: 'INVENTORY_COST',
+            status: 'POSTED',
+          });
+        }
+      }
+
+      // POS Sales -> Credits & Product Cost -> Debits
+      for (const s of posSales) {
+        const saleAmount = Number(s.netAmount);
+        totalCredits += saleAmount;
+        ledgerEntries.push({
+          id: `pos_${s.id}`,
+          date: s.createdAt,
+          type: 'CREDIT',
+          category: 'POS_SALE',
+          reference: s.receiptNumber,
+          description: `In-Store POS Sale (Cashier: ${s.cashier.name})`,
+          amount: saleAmount,
+          paymentMethod: s.paymentMethod,
+          status: 'COMPLETED',
+        });
+
+        const cogs = s.items.reduce((acc: number, it: any) => acc + Number(it.product.costPrice || 0) * it.quantity, 0);
+        if (cogs > 0) {
+          totalDebits += cogs;
+          ledgerEntries.push({
+            id: `cogs_pos_${s.id}`,
+            date: s.createdAt,
+            type: 'DEBIT',
+            category: 'COGS',
+            reference: `COGS-${s.receiptNumber}`,
+            description: `Inventory Cost for POS #${s.receiptNumber}`,
+            amount: Number(cogs.toFixed(2)),
+            paymentMethod: 'INVENTORY_COST',
+            status: 'POSTED',
+          });
+        }
+      }
+
+      // Invoices -> Debits
+      for (const inv of invoices) {
+        const invAmount = Number(inv.amount);
+        totalDebits += invAmount;
+        ledgerEntries.push({
+          id: `inv_${inv.id}`,
+          date: inv.paidAt || inv.createdAt,
+          type: 'DEBIT',
+          category: 'SUBSCRIPTION_FEE',
+          reference: inv.invoiceNumber,
+          description: `Platform Subscription Billing Fee`,
+          amount: invAmount,
+          paymentMethod: 'BILLING',
+          status: inv.status,
+        });
+      }
+
+      // Sort entries newest first
+      let sortedEntries = ledgerEntries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+      if (filterType === 'CREDIT') {
+        sortedEntries = sortedEntries.filter((e) => e.type === 'CREDIT');
+      } else if (filterType === 'DEBIT') {
+        sortedEntries = sortedEntries.filter((e) => e.type === 'DEBIT');
+      }
+
+      const netCashFlow = totalCredits - totalDebits;
+
+      return res.json({
+        success: true,
+        entries: sortedEntries,
+        summary: {
+          totalCredits: Number(totalCredits.toFixed(2)),
+          totalDebits: Number(totalDebits.toFixed(2)),
+          netCashFlow: Number(netCashFlow.toFixed(2)),
+          totalEntries: sortedEntries.length,
+          currency: 'ETB',
+        },
+      });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }

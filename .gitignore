@@ -45,12 +45,8 @@ prisma/*.db
 prisma/*.db-journal
 
 # Uploaded User Files (Keep folder structure, exclude binary uploads)
-uploads/screenshots/*
-!uploads/screenshots/.gitkeep
-uploads/products/*
-!uploads/products/.gitkeep
-uploads/branding/*
-!uploads/branding/.gitkeep
+uploads/*/*
+!uploads/*/.gitkeep
 
 # IDE and Editor Files
 .vscode/*

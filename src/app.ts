@@ -28,7 +28,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Health Check API
-app.get('/health', (req: Request, res: Response) => {
+app.get(['/health', '/health/ready'], (req: Request, res: Response) => {
   res.json({
     status: 'HEALTHY',
     service: 'MyMall Multi-Tenant SaaS Backend',

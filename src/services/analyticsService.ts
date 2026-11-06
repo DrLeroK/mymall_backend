@@ -147,19 +147,39 @@ export class AnalyticsService {
     const posGMV = posSales.reduce((acc, s) => acc + Number(s.netAmount), 0);
     const platformGMV = onlineGMV + posGMV;
 
-    // Subscription MRR (Monthly Recurring Revenue)
-    const activeSubscriptions = await prisma.storeSubscription.findMany({
-      where: { status: 'APPROVED', endDate: { gte: new Date() } },
+    // Subscription MRR (Monthly Recurring Revenue) & Approved Income
+    const approvedSubscriptions = await prisma.storeSubscription.findMany({
+      where: { status: 'APPROVED' },
       include: { plan: true },
     });
 
     let mrr = 0;
-    activeSubscriptions.forEach((sub) => {
-      const price = Number(sub.amount);
-      if (sub.billingCycle === 'YEARLY') {
-        mrr += price / 12;
+    let totalSubscriptionIncome = 0;
+    let chapaSubscriptionIncome = 0;
+    let bankTransferSubscriptionIncome = 0;
+
+    const now = new Date();
+    approvedSubscriptions.forEach((sub) => {
+      const price = Number(sub.amount) || 0;
+      totalSubscriptionIncome += price;
+
+      if (sub.paymentMethod === 'CHAPA') {
+        chapaSubscriptionIncome += price;
       } else {
-        mrr += price;
+        bankTransferSubscriptionIncome += price;
+      }
+
+      // MRR calculation for currently active subscriptions
+      if (sub.endDate && new Date(sub.endDate) >= now) {
+        if (sub.billingCycle === 'YEARLY') {
+          mrr += price / 12;
+        } else if (sub.billingCycle === 'SIX_MONTHS') {
+          mrr += price / 6;
+        } else if (sub.billingCycle === 'THREE_MONTHS') {
+          mrr += price / 3;
+        } else {
+          mrr += price;
+        }
       }
     });
 
@@ -177,6 +197,10 @@ export class AnalyticsService {
       suspendedStores,
       pastDueStores,
       platformGMV,
+      totalSubscriptionIncome: Math.round(totalSubscriptionIncome * 100) / 100,
+      chapaSubscriptionIncome: Math.round(chapaSubscriptionIncome * 100) / 100,
+      bankTransferSubscriptionIncome: Math.round(bankTransferSubscriptionIncome * 100) / 100,
+      approvedSubscriptionsCount: approvedSubscriptions.length,
       mrr: Math.round(mrr * 100) / 100,
       arr: Math.round(arr * 100) / 100,
       churnRatePercent: Math.round(churnRatePercent * 10) / 10,

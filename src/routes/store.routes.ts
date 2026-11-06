@@ -58,6 +58,7 @@ router.patch(
 
 // Super Admin Store Operations
 router.get('/admin/all', authenticate, authorizeRoles(Role.SUPER_ADMIN), StoreController.adminListStores);
+router.get('/admin/owners', authenticate, authorizeRoles(Role.SUPER_ADMIN), StoreController.adminListStoreOwners);
 router.get('/admin/:id', authenticate, authorizeRoles(Role.SUPER_ADMIN), StoreController.adminGetStore);
 router.patch('/admin/:id/status', authenticate, authorizeRoles(Role.SUPER_ADMIN), StoreController.adminUpdateStoreStatus);
 

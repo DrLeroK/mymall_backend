@@ -10,13 +10,16 @@ export class EmailService {
       const user = process.env.SMTP_USER;
       const pass = process.env.SMTP_PASS;
 
-      if (host && user && pass) {
-        this.transporter = nodemailer.createTransport({
+      if (host) {
+        const transportConfig: any = {
           host,
           port,
           secure: port === 465,
-          auth: { user, pass },
-        });
+        };
+        if (user && pass) {
+          transportConfig.auth = { user, pass };
+        }
+        this.transporter = nodemailer.createTransport(transportConfig);
       }
     }
     return this.transporter;
@@ -165,4 +168,56 @@ Reset Token: ${resetToken}
 
     return true;
   }
+
+  /**
+   * Send Staff Invitation Email
+   */
+  static async sendStaffInviteEmail(
+    email: string,
+    storeName: string,
+    role: string,
+    inviteCode: string
+  ): Promise<boolean> {
+    const transporter = this.getTransporter();
+    const fromAddress = process.env.EMAIL_FROM || '"MyMall Platform" <noreply@mymall.com>';
+
+    const subject = `Invitation to join ${storeName} on MyMall as ${role}`;
+    const text = `Hello,\n\nYou have been invited to join ${storeName} as a ${role} on the MyMall platform.\n\nYour One-Time Invite Code is: ${inviteCode}\n\nPlease log in or sign up with this email (${email}) and enter this code in your staff dashboard to accept the invitation.\n\nBest regards,\n${storeName} Management`;
+
+    if (transporter) {
+      try {
+        await transporter.sendMail({
+          from: fromAddress,
+          to: email,
+          subject,
+          text,
+        });
+        return true;
+      } catch (err: any) {
+        console.error(`❌ [EmailService] Failed to send staff invite via SMTP:`, err.message);
+      }
+    }
+
+    console.log(`
+=============================================================
+📬 [DEV/MOCK STAFF INVITE EMAIL]
+To: ${email}
+Subject: ${subject}
+Invite Code: >>> ${inviteCode} <<<
+Store: ${storeName} | Role: ${role}
+=============================================================`);
+    return true;
+  }
 }
+
+export const sendVerificationEmail = async (email: string, otp: string, name?: string) => {
+  return EmailService.sendOtpEmail(email, otp);
+};
+
+export const sendPasswordResetEmail = async (email: string, code: string, name?: string) => {
+  return EmailService.sendPasswordResetEmail(email, code, code);
+};
+
+export const sendStaffInviteEmail = async (email: string, storeName: string, role: string, code: string) => {
+  return EmailService.sendStaffInviteEmail(email, storeName, role, code);
+};

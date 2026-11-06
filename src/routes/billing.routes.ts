@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { BillingController } from '../controllers/billing.controller';
-import { authenticate, authorizeRoles } from '../middleware/auth.middleware';
+import { authenticate, optionalAuthenticate, authorizeRoles } from '../middleware/auth.middleware';
 import { tenantIsolation } from '../middleware/tenant.middleware';
 import { uploadScreenshot } from '../middleware/upload.middleware';
 import { Role } from '@prisma/client';
@@ -45,12 +45,14 @@ router.post(
   tenantIsolation,
   BillingController.initializeChapaSubscription
 );
-router.get('/chapa/verify/:txRef', BillingController.verifyChapaSubscription);
+router.get('/chapa/verify/:txRef', optionalAuthenticate, BillingController.verifyChapaSubscription);
 
 // ==========================================
 // Store Owner Invoices & Subscription History
 // ==========================================
 router.get('/invoices', authenticate, tenantIsolation, BillingController.getInvoices);
+router.get('/history', authenticate, tenantIsolation, BillingController.getSubscriptionHistory);
+router.get('/accounting-ledger', authenticate, tenantIsolation, BillingController.getAccountingLedger);
 
 // ==========================================
 // Super Admin Subscription Review Queue

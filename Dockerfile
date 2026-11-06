@@ -18,8 +18,8 @@ WORKDIR /app
 # Copy package descriptors
 COPY package*.json ./
 
-# Install all dependencies (including devDependencies needed for build)
-RUN npm install
+# Install all dependencies (clean install from package-lock.json)
+RUN npm ci
 
 # Copy Prisma schema and generate Prisma Client
 COPY prisma ./prisma/
@@ -39,13 +39,11 @@ FROM base AS runner
 
 WORKDIR /app
 
-# Copy package descriptors and install production dependencies + CLI tools
+# Copy package descriptors
 COPY package*.json ./
-RUN npm install --omit=dev && npm install -g prisma tsx
 
-# Copy generated Prisma client from builder
-COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/client
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+# Copy complete node_modules (including Prisma client & CLI tools) from builder
+COPY --from=builder /app/node_modules ./node_modules
 
 # Copy compiled JavaScript output
 COPY --from=builder /app/dist ./dist
@@ -53,8 +51,8 @@ COPY --from=builder /app/dist ./dist
 # Copy Prisma schema and seed script
 COPY prisma ./prisma
 
-# Ensure uploads directory structure exists
-RUN mkdir -p uploads/screenshots uploads/products uploads/branding
+# Ensure static uploads directories exist
+RUN mkdir -p /app/uploads/screenshots /app/uploads/avatars /app/uploads/products /app/uploads/branding /app/uploads/receipts /app/uploads/general
 
 # Copy startup entrypoint script
 COPY docker-entrypoint.sh ./

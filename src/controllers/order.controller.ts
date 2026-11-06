@@ -4,6 +4,8 @@ import { InventoryService } from '../services/inventoryService';
 import { OrderStatus, PaymentProofStatus, AlertType, Role, OrderType } from '@prisma/client';
 import { notifyStore, notifyUser } from '../sockets/socket';
 import { ChapaService } from '../services/chapaService';
+import { StorageService } from '../services/storageService';
+import { ReceiptService } from '../services/receiptService';
 import { Validator } from '../utils/validator';
 
 export class OrderController {
@@ -153,7 +155,8 @@ export class OrderController {
 
         const taxRate = Number(store.taxRate) || 0;
         const taxAmount = (subtotal * taxRate) / 100;
-        const shippingCost = isDelivery ? 5.00 : 0.00;
+        const storeDeliveryFee = store.deliveryFee !== undefined && store.deliveryFee !== null ? Number(store.deliveryFee) : 50.00;
+        const shippingCost = isDelivery ? storeDeliveryFee : 0.00;
         const totalAmount = subtotal + taxAmount + shippingCost;
 
         const customerId = req.user ? req.user.id : null;
@@ -213,22 +216,32 @@ export class OrderController {
         const lastName = rest.join(' ') || 'Customer';
 
         const storeChapaKey = store.chapaSecretKey || null;
-        const emailToUse = order.customerEmail.includes('@example.com')
-          ? (process.env.SMTP_USER || 'customer@mymall.com')
-          : order.customerEmail;
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        const cleanEmail = (order.customerEmail || '').replace(/['"]/g, '').trim();
+        const smtpEmail = (process.env.SMTP_USER || '').replace(/['"]/g, '').trim();
+        const emailToUse = (cleanEmail && emailRegex.test(cleanEmail) && !cleanEmail.endsWith('@example.com'))
+          ? cleanEmail
+          : (smtpEmail && emailRegex.test(smtpEmail))
+            ? smtpEmail
+            : 'customer@mymall.et';
+
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3003';
+        const backendUrl = process.env.BACKEND_URL || 'http://localhost:5001';
+        const finalReturnUrl = returnUrl || `${frontendUrl}/orders/${order.id}?payment=chapa_success&txRef=${chapaTxRef}`;
+        const finalCallbackUrl = callbackUrl || `${backendUrl}/api/v1/orders/chapa/verify/${chapaTxRef}`;
 
         const chapaRes = await ChapaService.initializePayment({
           amount: order.totalAmount.toString(),
-          currency: store.currency === 'USD' ? 'USD' : 'ETB',
+          currency: 'ETB',
           email: emailToUse,
           firstName,
           lastName,
           phoneNumber: customerPhone,
           txRef: chapaTxRef,
-          callbackUrl,
-          returnUrl,
+          callbackUrl: finalCallbackUrl,
+          returnUrl: finalReturnUrl,
           title: 'MyMall Order',
-          description: `Online Order Payment`,
+          description: `Online Order Payment #${order.orderNumber}`,
         }, storeChapaKey);
 
         if (chapaRes.success && chapaRes.data) {
@@ -263,7 +276,10 @@ export class OrderController {
 
       const order = await prisma.order.findUnique({
         where: { chapaTxRef: txRef },
-        include: { store: true },
+        include: {
+          store: true,
+          items: { include: { product: true } },
+        },
       });
 
       if (!order) {
@@ -282,12 +298,41 @@ export class OrderController {
         return res.status(400).json({ success: false, message: 'Payment verification failed with Chapa or is still pending.' });
       }
 
-      // Mark Order as PAID
+      // Generate official digital order receipt document and save to paymentProofUrl
+      let receiptUrl = 'CHAPA_GATEWAY';
+      try {
+        receiptUrl = await ReceiptService.generateOrderReceiptFile({
+          storeName: order.store.name,
+          orderNumber: order.orderNumber,
+          customerName: order.customerName,
+          customerEmail: order.customerEmail,
+          customerPhone: order.customerPhone,
+          items: order.items.map((it) => ({
+            name: it.product?.name || `Product #${it.productId}`,
+            quantity: it.quantity,
+            unitPrice: Number(it.unitPrice),
+            subtotal: Number(it.subtotal || it.quantity * Number(it.unitPrice)),
+          })),
+          subtotal: Number(order.subtotal),
+          taxAmount: Number(order.taxAmount || 0),
+          shippingCost: Number(order.shippingCost || 0),
+          totalAmount: Number(order.totalAmount),
+          currency: order.store.currency,
+          txRef,
+          paymentDate: new Date(),
+          shippingAddress: order.shippingAddress,
+        });
+      } catch (receiptErr: any) {
+        console.warn('Could not generate digital order receipt file:', receiptErr.message);
+      }
+
+      // Mark Order as PAID and save receipt proof
       const updatedOrder = await prisma.order.update({
         where: { id: order.id },
         data: {
           status: OrderStatus.PAID,
           paymentProofStatus: PaymentProofStatus.VERIFIED,
+          paymentProofUrl: receiptUrl,
           paymentProofNotes: 'Automated instant verification via Chapa payment gateway.',
         },
       });
@@ -326,7 +371,7 @@ export class OrderController {
         return res.status(400).json({ success: false, message: 'Screenshot file is required.' });
       }
 
-      const paymentProofUrl = `/uploads/screenshots/${req.file.filename}`;
+      const paymentProofUrl = await StorageService.uploadFile(req.file, 'screenshots');
 
       const order = await prisma.order.findUnique({ where: { id: orderId } });
       if (!order) {
@@ -475,23 +520,158 @@ export class OrderController {
   }
 
   /**
+   * List Personal Customer Orders (Accessible by any authenticated user: Customer, Staff, Store Owner, Admin)
+   */
+  static async getMyOrders(req: Request, res: Response) {
+    try {
+      if (!req.user) {
+        return res.status(401).json({ success: false, message: 'Authentication required.' });
+      }
+
+      const { status, page: pageQuery, limit: limitQuery } = req.query;
+
+      const whereClause: any = {
+        OR: [
+          { customerId: req.user.id },
+          { customerEmail: req.user.email.toLowerCase().trim() },
+        ],
+      };
+
+      if (status) whereClause.status = status as OrderStatus;
+
+      const total = await prisma.order.count({ where: whereClause });
+
+      const page = pageQuery ? Math.max(1, parseInt(pageQuery as string, 10)) : undefined;
+      const isUnlimited = limitQuery === 'all' || limitQuery === '0';
+      const limit = isUnlimited
+        ? undefined
+        : limitQuery
+          ? Math.max(1, parseInt(limitQuery as string, 10))
+          : (page ? 10 : undefined);
+
+      const findArgs: any = {
+        where: whereClause,
+        include: {
+          store: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              logoUrl: true,
+              address: true,
+              contactPhone: true,
+              currency: true,
+            },
+          },
+          items: {
+            include: {
+              product: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                  images: true,
+                  sellingPrice: true,
+                  sku: true,
+                },
+              },
+              variant: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      };
+
+      if (page && limit) {
+        findArgs.skip = (page - 1) * limit;
+        findArgs.take = limit;
+      }
+
+      const orders = await prisma.order.findMany(findArgs);
+
+      return res.json({
+        success: true,
+        count: orders.length,
+        total,
+        page: page || 1,
+        totalPages: limit ? Math.ceil(total / limit) : 1,
+        limit: limit || total,
+        orders,
+      });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  /**
    * List Orders for Store Admin / Staff
    */
   static async listOrders(req: Request, res: Response) {
     try {
-      const storeId = req.storeId!;
-      const { status } = req.query;
+      const { status, page: pageQuery, limit: limitQuery, scope } = req.query;
 
-      const whereClause: any = { storeId };
+      let whereClause: any = {};
+
+      if (req.user && (scope === 'personal' || req.query.personal === 'true' || req.user.role === Role.CUSTOMER)) {
+        whereClause.OR = [
+          { customerId: req.user.id },
+          { customerEmail: req.user.email.toLowerCase() },
+        ];
+      } else if (req.storeId) {
+        whereClause.storeId = req.storeId;
+      } else if (req.user?.role === Role.STORE_OWNER || req.user?.role === Role.STORE_STAFF) {
+        return res.status(400).json({
+          success: false,
+          message: 'Store context is required to list store orders.',
+        });
+      }
+
       if (status) whereClause.status = status as OrderStatus;
 
-      const orders = await prisma.order.findMany({
-        where: whereClause,
-        include: { items: { include: { product: true } } },
-        orderBy: { createdAt: 'desc' },
-      });
+      const total = await prisma.order.count({ where: whereClause });
 
-      return res.json({ success: true, count: orders.length, orders });
+      const page = pageQuery ? Math.max(1, parseInt(pageQuery as string, 10)) : undefined;
+      const isUnlimited = limitQuery === 'all' || limitQuery === '0';
+      const limit = isUnlimited
+        ? undefined
+        : limitQuery
+          ? Math.max(1, parseInt(limitQuery as string, 10))
+          : (page ? 10 : undefined);
+
+      const findArgs: any = {
+        where: whereClause,
+        include: {
+          store: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              logoUrl: true,
+              address: true,
+              contactPhone: true,
+            },
+          },
+          items: { include: { product: true, variant: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      };
+
+      if (page && limit) {
+        findArgs.skip = (page - 1) * limit;
+        findArgs.take = limit;
+      }
+
+      const orders = await prisma.order.findMany(findArgs);
+
+      return res.json({
+        success: true,
+        count: orders.length,
+        total,
+        page: page || 1,
+        totalPages: limit ? Math.ceil(total / limit) : 1,
+        limit: limit || total,
+        orders,
+      });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }
@@ -524,6 +704,146 @@ export class OrderController {
 
       if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
       return res.json({ success: true, order });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  /**
+   * Sales Report: Unified Online Storefront & Offline POS Sales Stream
+   */
+  static async getSalesReport(req: Request, res: Response) {
+    try {
+      const storeId = req.storeId!;
+      const channel = ((req.query.channel as string) || 'ALL').toUpperCase();
+      const search = ((req.query.search as string) || '').trim().toLowerCase();
+
+      // 1. Fetch Online Orders
+      const onlineOrders = await prisma.order.findMany({
+        where: { storeId },
+        include: {
+          items: {
+            include: {
+              product: { select: { id: true, name: true, sku: true, costPrice: true } },
+              variant: { select: { id: true, name: true, sku: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      // 2. Fetch Offline POS Sales
+      const posSales = await prisma.pOSSale.findMany({
+        where: { storeId },
+        include: {
+          cashier: { select: { id: true, name: true, email: true } },
+          items: {
+            include: {
+              product: { select: { id: true, name: true, sku: true, costPrice: true } },
+              variant: { select: { id: true, name: true, sku: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      // Map Online Orders into standard sales records
+      const mappedOnline = onlineOrders.map((o) => {
+        const totalCost = o.items.reduce((acc: number, it: any) => acc + (Number(it.product.costPrice || 0) * it.quantity), 0);
+        const amount = Number(o.totalAmount);
+        return {
+          id: `online_${o.id}`,
+          rawId: o.id,
+          channel: 'ONLINE' as const,
+          referenceNumber: o.orderNumber,
+          customerName: o.customerName || 'Online Customer',
+          customerPhone: o.customerPhone || '—',
+          amount,
+          costAmount: Number(totalCost.toFixed(2)),
+          netProfit: Number((amount - totalCost).toFixed(2)),
+          paymentMethod: o.paymentMethod,
+          status: o.status,
+          itemCount: o.items.reduce((acc: number, it: any) => acc + it.quantity, 0),
+          createdAt: o.createdAt,
+          items: o.items.map((it: any) => ({
+            name: it.product.name,
+            variantName: it.variant?.name,
+            quantity: it.quantity,
+            price: Number(it.unitPrice),
+            subtotal: Number(it.subtotal),
+          })),
+        };
+      });
+
+      // Map Offline POS Sales into standard sales records
+      const mappedOffline = posSales.map((s: any) => {
+        const totalCost = s.items.reduce((acc: number, it: any) => acc + (Number(it.product.costPrice || 0) * it.quantity), 0);
+        const amount = Number(s.netAmount);
+        return {
+          id: `offline_${s.id}`,
+          rawId: s.id,
+          channel: 'OFFLINE' as const,
+          referenceNumber: s.receiptNumber,
+          customerName: s.customerName || 'Walk-in Customer',
+          customerPhone: s.customerPhone || '—',
+          cashierName: s.cashier.name,
+          amount,
+          costAmount: Number(totalCost.toFixed(2)),
+          netProfit: Number((amount - totalCost).toFixed(2)),
+          paymentMethod: s.paymentMethod,
+          status: 'COMPLETED',
+          itemCount: s.items.reduce((acc: number, it: any) => acc + it.quantity, 0),
+          createdAt: s.createdAt,
+          items: s.items.map((it: any) => ({
+            name: it.product.name,
+            variantName: it.variant?.name,
+            quantity: it.quantity,
+            price: Number(it.unitPrice),
+            subtotal: Number(it.subtotal),
+          })),
+        };
+      });
+
+      // Combine & sort
+      let allSales = [...mappedOnline, ...mappedOffline].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+
+      // Channel Filter
+      if (channel === 'ONLINE') {
+        allSales = allSales.filter((s) => s.channel === 'ONLINE');
+      } else if (channel === 'OFFLINE') {
+        allSales = allSales.filter((s) => s.channel === 'OFFLINE');
+      }
+
+      // Search Filter
+      if (search) {
+        allSales = allSales.filter(
+          (s) =>
+            s.referenceNumber.toLowerCase().includes(search) ||
+            s.customerName.toLowerCase().includes(search) ||
+            s.paymentMethod.toLowerCase().includes(search)
+        );
+      }
+
+      const totalOnlineRevenue = mappedOnline.reduce((acc: number, s: any) => acc + s.amount, 0);
+      const totalOfflineRevenue = mappedOffline.reduce((acc: number, s: any) => acc + s.amount, 0);
+      const totalRevenue = totalOnlineRevenue + totalOfflineRevenue;
+      const totalProfit = allSales.reduce((acc: number, s: any) => acc + s.netProfit, 0);
+
+      return res.json({
+        success: true,
+        sales: allSales,
+        summary: {
+          totalRevenue: Number(totalRevenue.toFixed(2)),
+          totalOnlineRevenue: Number(totalOnlineRevenue.toFixed(2)),
+          totalOfflineRevenue: Number(totalOfflineRevenue.toFixed(2)),
+          totalProfit: Number(totalProfit.toFixed(2)),
+          totalOrdersCount: mappedOnline.length + mappedOffline.length,
+          onlineOrdersCount: mappedOnline.length,
+          offlineSalesCount: mappedOffline.length,
+        },
+      });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }

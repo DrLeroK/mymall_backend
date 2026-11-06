@@ -1,0 +1,82 @@
+# ==============================================================================
+# Render Blueprint Specification for MyMall Backend (render.yaml)
+# Docs: https://render.com/docs/blueprint-spec
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # MyMall Express Multi-Tenant SaaS Backend (REST API, WebSockets, Socket.io)
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: mymall-backend
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    autoDeploy: false
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mymall-postgres
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 1d
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 7d
+      - key: CLIENT_ORIGIN
+        value: http://localhost:3000
+      - key: FRONTEND_URL
+        value: http://localhost:3000
+      - key: SEED_DATABASE
+        value: "true"
+      - key: CHAPA_BASE_URL
+        value: https://api.chapa.co/v1
+      - key: CHAPA_PUBLIC_KEY
+        value: ""
+      - key: CHAPA_SECRET_KEY
+        value: ""
+      - key: CHAPA_WEBHOOK_SECRET
+        value: ""
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_USER
+        value: ""
+      - key: SMTP_PASS
+        value: ""
+      - key: EMAIL_FROM
+        value: noreply@mymall.local
+      - key: MAPBOX_ACCESS_TOKEN
+        value: ""
+      - key: R2_ACCOUNT_ID
+        value: ""
+      - key: R2_ACCESS_KEY_ID
+        value: ""
+      - key: R2_SECRET_ACCESS_KEY
+        value: ""
+      - key: R2_BUCKET_NAME
+        value: ""
+      - key: R2_PUBLIC_DOMAIN
+        value: ""
+
+# ------------------------------------------------------------------------------
+# Managed PostgreSQL Database Service on Render
+# ------------------------------------------------------------------------------
+databases:
+  - name: mymall-postgres
+    plan: free
+    databaseName: mymall_db
+    user: mymall_user
+    region: oregon

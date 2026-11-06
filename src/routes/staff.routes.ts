@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { StaffController } from '../controllers/staff.controller';
-import { authenticate, authorizeRoles } from '../middleware/auth.middleware';
+import { authenticate, optionalAuthenticate, authorizeRoles, authorizeStaffRoleOrPermission } from '../middleware/auth.middleware';
 import { tenantIsolation } from '../middleware/tenant.middleware';
-import { Role } from '@prisma/client';
+import { Role, StaffRole } from '@prisma/client';
 
 const router = Router();
 
@@ -15,19 +15,34 @@ router.post(
   StaffController.createInvite
 );
 
-// Staff accept invite (Public / Registration)
-router.post('/accept-invite', StaffController.acceptInvite);
+// Get invite details by code
+router.get('/invite/:code', StaffController.getInviteDetails);
+
+// Staff accept invite (Authenticated user or new registration matching invited email)
+router.post('/accept-invite', optionalAuthenticate, StaffController.acceptInvite);
+
+// Switch active working store context for multi-store staff
+router.post('/switch-store', authenticate, StaffController.switchStore);
 
 // List Store Staff
 router.get(
   '/',
   authenticate,
-  authorizeRoles(Role.SUPER_ADMIN, Role.STORE_OWNER),
   tenantIsolation,
+  authorizeStaffRoleOrPermission([StaffRole.MANAGER], 'manage_staff'),
   StaffController.listStaff
 );
 
-// Change Staff Role (CASHIER, MANAGER, INVENTORY_CLERK)
+// Update Staff Permissions & Role
+router.patch(
+  '/:id/permissions',
+  authenticate,
+  authorizeRoles(Role.SUPER_ADMIN, Role.STORE_OWNER),
+  tenantIsolation,
+  StaffController.updatePermissions
+);
+
+// Change Staff Role (CASHIER, MANAGER, INVENTORY_CLERK, ACCOUNTANT)
 router.patch(
   '/:id/role',
   authenticate,

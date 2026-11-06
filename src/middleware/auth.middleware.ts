@@ -65,3 +65,36 @@ export function authorizeStaffRole(...staffRoles: StaffRole[]) {
     });
   };
 }
+
+export function authorizeStaffRoleOrPermission(
+  requiredStaffRoles: StaffRole[],
+  permissionKey?: string,
+  options?: { allowCustomer?: boolean }
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    // Allow customer if endpoint permits customers to access their own resources
+    if (options?.allowCustomer && req.user.role === Role.CUSTOMER) {
+      return next();
+    }
+    // Store owner and Super admin always have access
+    if (req.user.role === Role.SUPER_ADMIN || req.user.role === Role.STORE_OWNER) {
+      return next();
+    }
+    if (req.user.role === Role.STORE_STAFF) {
+      if (req.user.staffRole && requiredStaffRoles.includes(req.user.staffRole)) {
+        return next();
+      }
+      if (permissionKey && req.user.permissions && req.user.permissions.includes(permissionKey)) {
+        return next(); // Custom permission override granted by store owner!
+      }
+    }
+
+    return res.status(403).json({
+      success: false,
+      message: `Forbidden. You do not have the required role (${requiredStaffRoles.join(', ')}) or custom permission (${permissionKey || 'none'}).`,
+    });
+  };
+}

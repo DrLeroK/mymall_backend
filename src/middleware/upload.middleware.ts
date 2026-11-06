@@ -9,3 +9,4 @@ export const uploadBranding = upload.fields([
 export const uploadScreenshot = upload.single('screenshot');
 
 export const uploadProductImages = upload.array('productImages', 5);
+export const uploadAnyImage = upload.any();

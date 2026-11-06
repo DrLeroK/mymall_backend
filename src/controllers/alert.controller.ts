@@ -1,127 +1,97 @@
-import { Request, Response } from 'express';
-import { prisma } from '../config/db';
-import { Role, AlertType } from '@prisma/client';
+import { Request, Response } from "express";
+import { NotificationService } from "../services/notificationService";
 
 export class AlertController {
   /**
-   * Get notifications for the current authenticated user/store
-   * Only returns unread / unseen notifications
+   * Fetch unseen popups for login / modal alert.
+   * Atomically marks them isSeen: true so they never show again on subsequent logins.
+   */
+  static async getUnseenPopups(req: Request, res: Response) {
+    try {
+      const user = req.user;
+      if (!user) {
+        return res.status(401).json({ success: false, message: "Authentication required" });
+      }
+
+      const popups = await NotificationService.getUnseenPopups(user);
+      return res.json({ success: true, count: popups.length, popups, alerts: popups });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  /**
+   * Get notification history for topbar notification bell dropdown
    */
   static async getNotifications(req: Request, res: Response) {
     try {
       const user = req.user;
       if (!user) {
-        return res.status(401).json({ success: false, message: 'Authentication required' });
+        return res.status(401).json({ success: false, message: "Authentication required" });
       }
 
-      let alerts: any[] = [];
+      const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 30;
+      const unreadOnly = req.query.unreadOnly === 'true' || req.query.unread === 'true';
 
-      if ((user.role === Role.STORE_OWNER || user.role === Role.STORE_STAFF) && user.storeId) {
-        // Merchant/Store receives store orders, customer chat messages, stock alerts
-        alerts = await prisma.alert.findMany({
-          where: {
-            storeId: user.storeId,
-            isRead: false, // Only unread notifications
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 30,
-        });
-      } else if (user.role === Role.SUPER_ADMIN) {
-        // Superadmin only receives platform disputes and billing verifications, NEVER store orders
-        alerts = await prisma.alert.findMany({
-          where: {
-            isRead: false,
-            type: {
-              notIn: [AlertType.NEW_ORDER, AlertType.LOW_STOCK],
-            },
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 30,
-          include: { store: { select: { id: true, name: true } } },
-        });
-      } else {
-        // Customer notifications: recent order updates
-        const recentOrders = await prisma.order.findMany({
-          where: { customerId: user.id },
-          orderBy: { updatedAt: 'desc' },
-          take: 10,
-          select: {
-            id: true,
-            orderNumber: true,
-            status: true,
-            totalAmount: true,
-            updatedAt: true,
-            createdAt: true,
-            store: { select: { name: true } },
-          },
-        });
-
-        alerts = recentOrders.map((o) => ({
-          id: o.id,
-          type: 'ORDER_UPDATE',
-          title: `Order #${o.orderNumber}`,
-          message: `Status: ${o.status} at ${o.store?.name || 'Store'}`,
-          isRead: false,
-          createdAt: o.updatedAt,
-        }));
-      }
-
-      const unreadCount = alerts.filter((a) => !a.isRead).length;
-
-      return res.json({
-        success: true,
-        alerts,
-        unreadCount,
-      });
+      const result = await NotificationService.getAlerts(user, page, limit, unreadOnly);
+      return res.json({ success: true, ...result });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }
   }
 
   /**
-   * Mark a single alert as read
+   * Mark single alert as read
    */
   static async markAsRead(req: Request, res: Response) {
     try {
-      const alertId = parseInt(req.params.id, 10);
-      if (isNaN(alertId)) {
-        return res.status(400).json({ success: false, message: 'Invalid alert ID' });
+      const user = req.user;
+      if (!user) {
+        return res.status(401).json({ success: false, message: "Authentication required" });
       }
 
-      await prisma.alert.update({
-        where: { id: alertId },
-        data: { isRead: true },
-      });
+      const alertId = parseInt(req.params.id, 10);
+      if (isNaN(alertId)) {
+        return res.status(400).json({ success: false, message: "Invalid alert ID" });
+      }
 
-      return res.json({ success: true, message: 'Alert marked as read' });
+      await NotificationService.markAsRead(alertId, user);
+      return res.json({ success: true, message: "Alert marked as read" });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }
   }
 
   /**
-   * Mark all alerts as read for the store
+   * Mark all alerts as read
    */
   static async markAllAsRead(req: Request, res: Response) {
     try {
       const user = req.user;
       if (!user) {
-        return res.status(401).json({ success: false, message: 'Authentication required' });
+        return res.status(401).json({ success: false, message: "Authentication required" });
       }
 
-      if (user.storeId) {
-        await prisma.alert.updateMany({
-          where: { storeId: user.storeId, isRead: false },
-          data: { isRead: true },
-        });
-      } else if (user.role === Role.SUPER_ADMIN) {
-        await prisma.alert.updateMany({
-          where: { isRead: false, type: { notIn: [AlertType.NEW_ORDER, AlertType.LOW_STOCK] } },
-          data: { isRead: true },
-        });
+      const result = await NotificationService.markAllAsRead(user);
+      return res.json({ success: true, message: "All alerts marked as read", ...result });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  /**
+   * Mark all alerts as seen (prevents popups from reappearing)
+   */
+  static async markAllAsSeen(req: Request, res: Response) {
+    try {
+      const user = req.user;
+      if (!user) {
+        return res.status(401).json({ success: false, message: "Authentication required" });
       }
 
-      return res.json({ success: true, message: 'All alerts marked as seen' });
+      const result = await NotificationService.markAllAsSeen(user);
+      return res.json({ success: true, message: "All alerts marked as seen", ...result });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }

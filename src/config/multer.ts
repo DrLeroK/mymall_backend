@@ -5,7 +5,7 @@ import fs from 'fs';
 const uploadsDir = path.join(__dirname, '../../uploads');
 
 // Ensure subfolders exist
-const folders = ['branding', 'screenshots', 'products'];
+const folders = ['branding', 'screenshots', 'products', 'receipts', 'general', 'avatars'];
 folders.forEach((folder) => {
   const dir = path.join(uploadsDir, folder);
   if (!fs.existsSync(dir)) {
@@ -15,10 +15,16 @@ folders.forEach((folder) => {
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    let folder = 'screenshots';
+    let folder = 'products';
     if (file.fieldname === 'logo' || file.fieldname === 'banner') {
       folder = 'branding';
-    } else if (file.fieldname === 'productImages' || file.fieldname === 'image') {
+    } else if (file.fieldname === 'screenshot') {
+      folder = 'screenshots';
+    } else if (file.fieldname === 'receipt') {
+      folder = 'receipts';
+    } else if (file.fieldname === 'avatar') {
+      folder = 'avatars';
+    } else {
       folder = 'products';
     }
     cb(null, path.join(uploadsDir, folder));
@@ -31,16 +37,26 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-  if (allowedTypes.includes(file.mimetype)) {
+  const allowedMimeTypes = [
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/webp',
+    'image/avif',
+    'image/gif',
+    'image/svg+xml',
+    'image/bmp',
+  ];
+  const isAllowedExt = Boolean(file.originalname.match(/\.(jpe?g|png|webp|avif|gif|svg|bmp)$/i));
+  if (allowedMimeTypes.includes(file.mimetype.toLowerCase()) || isAllowedExt) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file format. Only JPEG, PNG, and WebP images are allowed.'));
+    cb(new Error('Invalid image format. Allowed formats: JPEG, PNG, WebP, AVIF, GIF, and SVG.'));
   }
 };
 
 export const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
   fileFilter,
 });

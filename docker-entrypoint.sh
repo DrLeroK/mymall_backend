@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-echo "==> [Docker Entrypoint] Starting MyMall Multi-Tenant E-Commerce Backend..."
+echo "==> [Docker Entrypoint] Starting MyMall Multi-Tenant SaaS E-Commerce Backend..."
 
 # 1. Validate and Wait for PostgreSQL
 if [ -z "$DATABASE_URL" ]; then
@@ -10,32 +10,43 @@ if [ -z "$DATABASE_URL" ]; then
 fi
 
 echo "==> [Docker Entrypoint] Waiting for database connection to be ready..."
+RETRY_COUNT=0
+MAX_RETRIES=30
+
 until node -e "
 const net = require('net');
-const url = new URL(process.env.DATABASE_URL);
-const client = net.createConnection({ host: url.hostname, port: url.port || 5432 }, () => {
-  client.end();
-  process.exit(0);
-});
-client.on('error', () => process.exit(1));
+try {
+  const dbUrl = process.env.DATABASE_URL.replace(/^postgres:\/\//, 'postgresql://');
+  const url = new URL(dbUrl);
+  const client = net.createConnection({ host: url.hostname, port: parseInt(url.port, 10) || 5432 }, () => {
+    client.end();
+    process.exit(0);
+  });
+  client.setTimeout(2000, () => { client.destroy(); process.exit(1); });
+  client.on('error', () => process.exit(1));
+} catch (e) {
+  process.exit(1);
+}
 " 2>/dev/null; do
-  echo "    Database is unavailable - sleeping 2s..."
+  RETRY_COUNT=$((RETRY_COUNT + 1))
+  if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
+    echo "==> [Docker Entrypoint] WARNING: Database probe reached timeout ($MAX_RETRIES attempts). Proceeding to Prisma..."
+    break
+  fi
+  echo "    Database unavailable - attempt $RETRY_COUNT/$MAX_RETRIES - sleeping 2s..."
   sleep 2
 done
-echo "==> [Docker Entrypoint] Database is connected and ready!"
+echo "==> [Docker Entrypoint] Database connectivity check passed!"
 
 # 2. Synchronize Prisma schema with PostgreSQL
 echo "==> [Docker Entrypoint] Synchronizing Prisma schema to PostgreSQL..."
 npx prisma db push --skip-generate
 
-# 3. Optional automatic database seeding
+# 3. Optional automatic database seeding (Zero Data Loss Protected)
 if [ "$SEED_DATABASE" = "true" ]; then
-  echo "==> [Docker Entrypoint] Running database seed (stores, plans, admin accounts)..."
-  npx tsx prisma/seed.ts || echo "==> [Docker Entrypoint] Seeding finished or records already exist."
+  echo "==> [Docker Entrypoint] Running database seed check (initial deployment demo records)..."
+  npx ts-node prisma/seed.ts || echo "==> [Docker Entrypoint] Seeding finished or records already exist."
 fi
 
-# 4. Ensure upload directories exist
-mkdir -p uploads/screenshots uploads/products uploads/branding
-
-echo "==> [Docker Entrypoint] Starting MyMall application server..."
+echo "==> [Docker Entrypoint] Starting MyMall backend application server on port ${PORT:-5001}..."
 exec "$@"

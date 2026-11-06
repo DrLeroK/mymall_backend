@@ -7,6 +7,7 @@ export interface AuthUserPayload {
   role: Role;
   staffRole?: StaffRole | null;
   storeId?: number | null;
+  permissions?: string[];
 }
 
 declare global {

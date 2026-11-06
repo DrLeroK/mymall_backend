@@ -18,6 +18,7 @@ enum StaffRole {
   MANAGER
   CASHIER
   INVENTORY_CLERK
+  ACCOUNTANT
 }
 
 enum StoreStatus {
@@ -163,6 +164,8 @@ model User {
   customerConversations ChatConversation[]  @relation("CustomerConversations")
   adminConversations    ChatConversation[]  @relation("AdminConversations")
   addresses             CustomerAddress[]   @relation("UserAddresses")
+  memberships           StoreStaffMember[]  @relation("UserStoreMemberships")
+  alerts                Alert[]             @relation("UserAlerts")
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
 
@@ -180,12 +183,14 @@ model SubscriptionPlan {
   yearlyPrice         Decimal             @db.Decimal(10, 2)
   maxProducts         Int                 @default(100)
   maxStaff            Int                 @default(3)
+  trialDays           Int                 @default(0) // 5 for Starter plan
   searchRankBoost     Int                 @default(1) // Higher tier stores rank higher in marketplace searches
   analyticsLevel      String              @default("BASIC") // BASIC, ADVANCED, PRO
   customDomainAllowed Boolean             @default(false)
   isActive            Boolean             @default(true)
   stores              Store[]
-  subscriptions       StoreSubscription[]
+  subscriptions       StoreSubscription[] @relation("PlanSubscriptions")
+  previousSubscriptions StoreSubscription[] @relation("PreviousSubscriptions")
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 }
@@ -209,8 +214,9 @@ model Store {
   chapaWebhookSecret String?
 
   // Store Settings
-  currency           String              @default("USD")
+  currency           String              @default("ETB")
   taxRate            Decimal             @default(0.00) @db.Decimal(5, 2)
+  deliveryFee        Decimal             @default(50.00) @db.Decimal(10, 2)
   returnPolicy       String?
   businessHours      String?             // JSON string for business hours
   primaryColor       String              @default("#3b82f6")
@@ -223,9 +229,12 @@ model Store {
   owner              User                @relation("StoreOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   currentPlanId      Int?
   plan               SubscriptionPlan?   @relation(fields: [currentPlanId], references: [id], onDelete: SetNull)
+  isTrial            Boolean             @default(true)
+  trialEndsAt        DateTime?
   subscriptionEndsAt DateTime?
 
   staff              User[]              @relation("StoreStaff")
+  staffMembers       StoreStaffMember[]  @relation("StoreStaffMembers")
   categories         ProductCategory[]
   products           Product[]
   orders             Order[]
@@ -281,7 +290,11 @@ model StoreSubscription {
   storeId         Int
   store           Store             @relation(fields: [storeId], references: [id], onDelete: Cascade)
   planId          Int
-  plan            SubscriptionPlan  @relation(fields: [planId], references: [id], onDelete: Restrict)
+  plan            SubscriptionPlan  @relation("PlanSubscriptions", fields: [planId], references: [id], onDelete: Restrict)
+  previousPlanId  Int?
+  previousPlan    SubscriptionPlan? @relation("PreviousSubscriptions", fields: [previousPlanId], references: [id], onDelete: SetNull)
+  daysGranted     Int               @default(30)
+  isUpgrade       Boolean           @default(false)
   billingCycle    BillingCycle      @default(MONTHLY)
   amount          Decimal           @db.Decimal(10, 2)
   paymentMethod   String            @default("SCREENSHOT") // SCREENSHOT, CHAPA
@@ -310,7 +323,7 @@ model Invoice {
   subscriptionId  Int?
   subscription    StoreSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
   amount          Decimal            @db.Decimal(10, 2)
-  currency        String             @default("USD")
+  currency        String             @default("ETB")
   status          String             @default("PAID")
   paidAt          DateTime           @default(now())
   createdAt       DateTime           @default(now())
@@ -342,6 +355,7 @@ model Product {
   category          ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   name              String
   slug              String
+  brand             String?
   description       String?
   sku               String?
   barcode           String?
@@ -353,6 +367,7 @@ model Product {
   unit              String           @default("pcs")
   images            String           @default("[]") // JSON string of image URLs
   isActive          Boolean          @default(true)
+  isOnlineVisible   Boolean          @default(true)
   hasVariants       Boolean          @default(false)
 
   variants          ProductVariant[]
@@ -622,12 +637,30 @@ model ChatMessage {
   @@index([senderId])
 }
 
+model StoreStaffMember {
+  id          Int        @id @default(autoincrement())
+  storeId     Int
+  store       Store      @relation("StoreStaffMembers", fields: [storeId], references: [id], onDelete: Cascade)
+  userId      Int
+  user        User       @relation("UserStoreMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  staffRole   StaffRole  @default(CASHIER)
+  permissions String     @default("[]") // JSON string array of permission codes e.g. ["manage_inventory", "process_refunds"]
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@unique([storeId, userId])
+  @@index([storeId])
+  @@index([userId])
+}
+
 model StaffInvite {
   id           Int               @id @default(autoincrement())
   storeId      Int
   store        Store             @relation(fields: [storeId], references: [id], onDelete: Cascade)
   email        String
   assignedRole StaffRole         @default(CASHIER)
+  permissions  String            @default("[]")
   inviteCode   String            @unique
   status       StaffInviteStatus @default(PENDING)
   invitedById  Int
@@ -637,21 +670,28 @@ model StaffInvite {
 
   @@index([storeId])
   @@index([inviteCode])
+  @@index([email])
 }
 
 model Alert {
-  id        Int       @id @default(autoincrement())
-  storeId   Int
-  store     Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
-  productId Int?
-  product   Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
-  type      AlertType
-  title     String
-  message   String
-  isRead    Boolean   @default(false)
-  createdAt DateTime  @default(now())
+  id         Int        @id @default(autoincrement())
+  targetType String     @default("STORE") // STORE, ADMIN, CUSTOMER
+  storeId    Int?
+  store      Store?     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  userId     Int?
+  user       User?      @relation("UserAlerts", fields: [userId], references: [id], onDelete: Cascade)
+  productId  Int?
+  product    Product?   @relation(fields: [productId], references: [id], onDelete: SetNull)
+  type       AlertType
+  title      String
+  message    String
+  isRead     Boolean    @default(false)
+  isSeen     Boolean    @default(false)
+  createdAt  DateTime   @default(now())
 
   @@index([storeId, isRead])
+  @@index([userId, isRead])
+  @@index([targetType])
 }
 
 model CustomerAddress {

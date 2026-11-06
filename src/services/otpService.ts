@@ -111,3 +111,17 @@ export class OtpService {
     }
   }
 }
+
+export function generateOTP(length = 6): string {
+  const min = Math.pow(10, length - 1);
+  const max = Math.pow(10, length) - 1;
+  return Math.floor(min + Math.random() * (max - min + 1)).toString();
+}
+
+export function hashOTP(otp: string): string {
+  return bcrypt.hashSync(otp, 10);
+}
+
+export function verifyOTP(otp: string, hash: string): boolean {
+  return bcrypt.compareSync(otp, hash);
+}

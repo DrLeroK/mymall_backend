@@ -23,29 +23,32 @@ export class SearchService {
       whereClause.category = { contains: category, mode: 'insensitive' };
     }
 
-    const stores = await prisma.store.findMany({
-      where: whereClause,
-      include: {
-        plan: {
-          select: {
-            id: true,
-            name: true,
-            searchRankBoost: true,
+    const [total, stores] = await Promise.all([
+      prisma.store.count({ where: whereClause }),
+      prisma.store.findMany({
+        where: whereClause,
+        include: {
+          plan: {
+            select: {
+              id: true,
+              name: true,
+              searchRankBoost: true,
+            },
+          },
+          storeReviews: {
+            where: { isApproved: true },
+            select: { rating: true },
+          },
+          _count: {
+            select: {
+              products: true,
+            },
           },
         },
-        storeReviews: {
-          where: { isApproved: true },
-          select: { rating: true },
-        },
-        _count: {
-          select: {
-            products: true,
-          },
-        },
-      },
-      take: limit,
-      skip: offset,
-    });
+        take: limit,
+        skip: offset,
+      }),
+    ]);
 
     // Rank stores: Boost by plan.searchRankBoost descending, then by average rating
     const rankedStores = stores.map((store) => {
@@ -82,7 +85,7 @@ export class SearchService {
       return b.avgRating - a.avgRating;
     });
 
-    return rankedStores;
+    return { stores: rankedStores, total };
   }
 
   /**
@@ -91,6 +94,7 @@ export class SearchService {
   static async searchProducts(query?: string, categorySlug?: string, minPrice?: number, maxPrice?: number, inStockOnly: boolean = false, limit: number = 30, offset: number = 0) {
     const whereClause: any = {
       isActive: true,
+      isOnlineVisible: true,
       store: {
         status: StoreStatus.ACTIVE,
       },
@@ -118,35 +122,38 @@ export class SearchService {
       if (maxPrice !== undefined) whereClause.sellingPrice.lte = maxPrice;
     }
 
-    const products = await prisma.product.findMany({
-      where: whereClause,
-      include: {
-        category: true,
-        variants: true,
-        reviews: {
-          where: { isApproved: true },
-          select: { rating: true },
-        },
-        store: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            currency: true,
-            logoUrl: true,
-            plan: {
-              select: {
-                id: true,
-                name: true,
-                searchRankBoost: true,
+    const [total, products] = await Promise.all([
+      prisma.product.count({ where: whereClause }),
+      prisma.product.findMany({
+        where: whereClause,
+        include: {
+          category: true,
+          variants: true,
+          reviews: {
+            where: { isApproved: true },
+            select: { rating: true },
+          },
+          store: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              currency: true,
+              logoUrl: true,
+              plan: {
+                select: {
+                  id: true,
+                  name: true,
+                  searchRankBoost: true,
+                },
               },
             },
           },
         },
-      },
-      take: limit,
-      skip: offset,
-    });
+        take: limit,
+        skip: offset,
+      }),
+    ]);
 
     const rankedProducts = products.map((p) => {
       const totalReviews = p.reviews.length;
@@ -190,6 +197,6 @@ export class SearchService {
       return b.avgRating - a.avgRating;
     });
 
-    return rankedProducts;
+    return { products: rankedProducts, total };
   }
 }

@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
 import { prisma } from '../config/db';
 import { Role, StoreStatus } from '@prisma/client';
+import { StoreService } from '../services/storeService';
+import { StorageService } from '../services/storageService';
+import { generateTokens } from '../utils/jwt';
 
 export class StoreController {
   /**
@@ -18,7 +21,7 @@ export class StoreController {
         contactEmail,
         contactPhone,
         address,
-        currency = 'USD',
+        currency = 'ETB',
         taxRate = 0,
         primaryColor = '#3b82f6',
         secondaryColor = '#1e293b',
@@ -33,69 +36,59 @@ export class StoreController {
       // Format slug
       const formattedSlug = slug.toLowerCase().replace(/[^a-z0-9-]/g, '');
 
-      // Check slug uniqueness
-      const existingSlug = await prisma.store.findUnique({ where: { slug: formattedSlug } });
-      if (existingSlug) {
-        return res.status(400).json({ success: false, message: `Subdomain/slug '${formattedSlug}' is already taken.` });
-      }
-
       // Check uploaded files if present
       const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
-      const logoUrl = files?.logo ? `/uploads/branding/${files.logo[0].filename}` : req.body.logoUrl || null;
-      const bannerUrl = files?.banner ? `/uploads/branding/${files.banner[0].filename}` : req.body.bannerUrl || null;
-
-      // Select Plan
-      let targetPlan = null;
-      if (planId) {
-        targetPlan = await prisma.subscriptionPlan.findUnique({ where: { id: parseInt(planId, 10) } });
+      let logoUrl = req.body.logoUrl || null;
+      let bannerUrl = req.body.bannerUrl || null;
+      if (files?.logo && files.logo.length > 0) {
+        logoUrl = await StorageService.uploadFile(files.logo[0], 'branding');
       }
-      if (!targetPlan) {
-        targetPlan = await prisma.subscriptionPlan.findFirst({ where: { isActive: true } });
+      if (files?.banner && files.banner.length > 0) {
+        bannerUrl = await StorageService.uploadFile(files.banner[0], 'branding');
       }
 
-      const subscriptionEndsAt = new Date();
-      subscriptionEndsAt.setDate(subscriptionEndsAt.getDate() + 14); // 14-day free trial / initial period
-
-      const store = await prisma.store.create({
-        data: {
-          name,
-          slug: formattedSlug,
-          tagline,
-          description,
-          category,
-          logoUrl,
-          bannerUrl,
-          contactEmail: contactEmail || req.user!.email,
-          contactPhone,
-          address,
-          currency,
-          taxRate: parseFloat(taxRate),
-          primaryColor,
-          secondaryColor,
-          accentColor,
-          ownerId,
-          currentPlanId: targetPlan?.id || null,
-          status: StoreStatus.ACTIVE,
-          subscriptionEndsAt,
-        },
+      const store = await StoreService.createStore(ownerId, {
+        name,
+        slug: formattedSlug,
+        tagline,
+        description,
+        category,
+        logoUrl,
+        bannerUrl,
+        contactEmail: contactEmail || req.user!.email,
+        contactPhone,
+        address,
+        currency,
+        taxRate: taxRate !== undefined ? parseFloat(taxRate) : 15.0,
+        deliveryFee: req.body.deliveryFee !== undefined ? parseFloat(req.body.deliveryFee) : 50.0,
+        primaryColor,
+        secondaryColor,
+        accentColor,
+        hideOutOfStock: Boolean(req.body.hideOutOfStock),
+        returnPolicy: req.body.returnPolicy,
+        businessHours: req.body.businessHours,
+        chapaPublicKey: req.body.chapaPublicKey,
+        chapaSecretKey: req.body.chapaSecretKey,
       });
 
-      // Update User role to STORE_OWNER and attach storeId
-      await prisma.user.update({
-        where: { id: ownerId },
-        data: {
-          role: Role.STORE_OWNER,
-          storeId: store.id,
-        },
+      const tokens = generateTokens({
+        id: req.user!.id,
+        email: req.user!.email,
+        name: req.user!.name,
+        role: Role.STORE_OWNER,
+        storeId: store.id,
+        permissions: [],
       });
 
       return res.status(201).json({
         success: true,
-        message: 'Store onboarded successfully.',
+        message: 'Store onboarded successfully with 5-day free trial.',
         store,
+        tokens,
       });
     } catch (error: any) {
-      return res.status(500).json({ success: false, message: error.message });
+      const statusCode = error.statusCode || error.status || 500;
+      return res.status(statusCode).json({ success: false, message: error.message });
     }
   }
 
@@ -111,6 +104,7 @@ export class StoreController {
         description,
         currency,
         taxRate,
+        deliveryFee,
         returnPolicy,
         businessHours,
         primaryColor,
@@ -120,32 +114,42 @@ export class StoreController {
         contactEmail,
         contactPhone,
         address,
+        chapaPublicKey,
+        chapaSecretKey,
+        chapaWebhookSecret,
       } = req.body;
 
       const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
-      const logoUrl = files?.logo ? `/uploads/branding/${files.logo[0].filename}` : undefined;
-      const bannerUrl = files?.banner ? `/uploads/branding/${files.banner[0].filename}` : undefined;
+      let logoUrl: string | undefined = req.body.logoUrl !== undefined ? req.body.logoUrl : undefined;
+      let bannerUrl: string | undefined = req.body.bannerUrl !== undefined ? req.body.bannerUrl : undefined;
+      if (files?.logo && files.logo.length > 0) {
+        logoUrl = await StorageService.uploadFile(files.logo[0], 'branding');
+      }
+      if (files?.banner && files.banner.length > 0) {
+        bannerUrl = await StorageService.uploadFile(files.banner[0], 'branding');
+      }
 
-      const updatedStore = await prisma.store.update({
-        where: { id: storeId },
-        data: {
-          ...(name && { name }),
-          ...(tagline !== undefined && { tagline }),
-          ...(description !== undefined && { description }),
-          ...(currency && { currency }),
-          ...(taxRate !== undefined && { taxRate: parseFloat(taxRate) }),
-          ...(returnPolicy !== undefined && { returnPolicy }),
-          ...(businessHours !== undefined && { businessHours: typeof businessHours === 'object' ? JSON.stringify(businessHours) : businessHours }),
-          ...(primaryColor && { primaryColor }),
-          ...(secondaryColor && { secondaryColor }),
-          ...(accentColor && { accentColor }),
-          ...(hideOutOfStock !== undefined && { hideOutOfStock: Boolean(hideOutOfStock) }),
-          ...(contactEmail && { contactEmail }),
-          ...(contactPhone && { contactPhone }),
-          ...(address && { address }),
-          ...(logoUrl && { logoUrl }),
-          ...(bannerUrl && { bannerUrl }),
-        },
+      const updatedStore = await StoreService.updateStoreSettings(storeId, req.user!.id, req.user!.role, {
+        name,
+        tagline,
+        description,
+        currency,
+        taxRate: taxRate !== undefined ? parseFloat(taxRate) : undefined,
+        deliveryFee: deliveryFee !== undefined ? parseFloat(deliveryFee) : undefined,
+        returnPolicy,
+        businessHours: typeof businessHours === 'object' ? JSON.stringify(businessHours) : businessHours,
+        primaryColor,
+        secondaryColor,
+        accentColor,
+        hideOutOfStock: hideOutOfStock !== undefined ? Boolean(hideOutOfStock) : undefined,
+        contactEmail,
+        contactPhone,
+        address,
+        logoUrl,
+        bannerUrl,
+        chapaPublicKey,
+        chapaSecretKey,
+        chapaWebhookSecret,
       });
 
       return res.json({
@@ -178,9 +182,14 @@ export class StoreController {
         },
       });
 
-      const hasActiveSubscription = Boolean(store?.subscriptions && store.subscriptions.length > 0);
+      const now = new Date();
+      const isUnderTrial = Boolean(
+        (store?.isTrial && store.trialEndsAt && now <= store.trialEndsAt) ||
+        (store?.subscriptionEndsAt && now <= store.subscriptionEndsAt)
+      );
+      const hasActiveSubscription = Boolean(store?.subscriptions && store.subscriptions.length > 0) || isUnderTrial;
 
-      return res.json({ success: true, store, hasActiveSubscription, isSuspended: req.isSuspended });
+      return res.json({ success: true, store, hasActiveSubscription, isUnderTrial, isSuspended: req.isSuspended });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }
@@ -385,6 +394,51 @@ export class StoreController {
       });
 
       return res.json({ success: true, message: `Store status updated to ${status}.`, store });
+    } catch (error: any) {
+      return res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  /**
+   * Super Admin: List all registered store owners and their store portfolios
+   */
+  static async adminListStoreOwners(req: Request, res: Response) {
+    try {
+      const owners = await prisma.user.findMany({
+        where: {
+          OR: [
+            { role: Role.STORE_OWNER },
+            { ownedStores: { some: {} } },
+          ],
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          avatarUrl: true,
+          isEmailVerified: true,
+          createdAt: true,
+          updatedAt: true,
+          ownedStores: {
+            include: {
+              plan: true,
+              _count: { select: { products: true, orders: true, staff: true, posSales: true } },
+              subscriptions: {
+                where: { status: 'APPROVED' },
+                orderBy: { endDate: 'desc' },
+                take: 1,
+                include: { plan: true },
+              },
+            },
+            orderBy: { createdAt: 'desc' },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      return res.json({ success: true, count: owners.length, owners });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
     }
