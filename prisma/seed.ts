@@ -12,7 +12,7 @@ import {
   ConversationType,
   AlertType,
 } from '@prisma/client';
-import * as bcrypt from 'bcryptjs';
+import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
@@ -34,7 +34,8 @@ async function main() {
 
   // 1. Password Hashes (Using strong password standard: P@ssw0rd2026!)
   const STRONG_PASSWORD = 'P@ssw0rd2026!';
-  const hashedPassword = await bcrypt.hash(STRONG_PASSWORD, 10);
+  const hasher: any = (bcrypt as any)?.hash ? bcrypt : (bcrypt as any)?.default || bcrypt;
+  const hashedPassword = await hasher.hash(STRONG_PASSWORD, 10);
 
   // 2. Clear Any Existing Tables in Clean Order (Only if uninitialized or force flag)
   await prisma.alert.deleteMany();
