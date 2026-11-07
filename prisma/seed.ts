@@ -11,6 +11,7 @@ import {
   OrderType,
   ConversationType,
   AlertType,
+} from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
