@@ -2,6 +2,8 @@ import { prisma } from '../../src/config/db';
 import { StoreService } from '../../src/services/storeService';
 import { AuthService } from '../../src/services/authService';
 
+import { ensureDefaultSubscriptionPlans } from '../helpers/seedPlans';
+
 export async function runStoreTenantIntegrationTests(): Promise<{ passed: number; failed: number }> {
   console.log('\n--- [INTEGRATION TEST] Store Creation & Tenant Isolation Module ---');
   let passed = 0;
@@ -22,6 +24,7 @@ export async function runStoreTenantIntegrationTests(): Promise<{ passed: number
   let createdStore: any = null;
 
   try {
+    await ensureDefaultSubscriptionPlans();
     // 1. Create verified store owner
     const reg = await AuthService.register({
       email: ownerEmail,

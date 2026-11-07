@@ -3,6 +3,8 @@ import { ProductService } from '../../src/services/productService';
 import { StoreService } from '../../src/services/storeService';
 import { AuthService } from '../../src/services/authService';
 
+import { ensureDefaultSubscriptionPlans } from '../helpers/seedPlans';
+
 export async function runProductVariantsIntegrationTests(): Promise<{ passed: number; failed: number }> {
   console.log('\n--- [INTEGRATION TEST] Product Variants & Plan Limits Module ---');
   let passed = 0;
@@ -23,6 +25,7 @@ export async function runProductVariantsIntegrationTests(): Promise<{ passed: nu
   let testStore: any = null;
 
   try {
+    await ensureDefaultSubscriptionPlans();
     // 1. Create owner and 5-day trial store
     await AuthService.register({
       email: ownerEmail,

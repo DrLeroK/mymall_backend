@@ -6,10 +6,14 @@ import { runStaffMembershipIntegrationTests } from './staff_membership.integrati
 import { runNotificationSyncboardIntegrationTests } from './notification_syncboard.integration.test';
 import { runTenantIsolationIntegrationTests } from './tenant_isolation.integration.test';
 
+import { ensureDefaultSubscriptionPlans } from '../helpers/seedPlans';
+
 async function main() {
   console.log('=============================================================');
   console.log('🧪 RUNNING COMPREHENSIVE INTEGRATION TEST SUITES: MyMall Backend');
   console.log('=============================================================');
+
+  await ensureDefaultSubscriptionPlans();
 
   let totalPassed = 0;
   let totalFailed = 0;

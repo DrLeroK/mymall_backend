@@ -44,9 +44,31 @@ export class StoreService {
     }
 
     // Auto-provision 5-Day Free Trial on Starter plan
-    const starterPlan = await prisma.subscriptionPlan.findFirst({
+    let starterPlan = await prisma.subscriptionPlan.findFirst({
       where: { name: 'Starter', isActive: true },
     });
+
+    if (!starterPlan) {
+      starterPlan = await prisma.subscriptionPlan.upsert({
+        where: { name: 'Starter' },
+        update: {},
+        create: {
+          name: 'Starter',
+          description: 'Ideal for local retail shops & startups in Ethiopia. Includes 5-day free trial.',
+          monthlyPrice: 299.0,
+          threeMonthsPrice: 799.0,
+          sixMonthsPrice: 1499.0,
+          yearlyPrice: 2899.0,
+          maxProducts: 25,
+          maxStaff: 2,
+          trialDays: 5,
+          searchRankBoost: 1,
+          analyticsLevel: 'BASIC',
+          customDomainAllowed: false,
+          isActive: true,
+        },
+      });
+    }
 
     const now = new Date();
     const trialDays = starterPlan?.trialDays || 5;

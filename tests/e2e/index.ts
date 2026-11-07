@@ -7,11 +7,14 @@ import { runStaffInviteMultiStoreE2ETests } from './staff_invite_multistore.e2e.
 import { runNotificationsSyncboardE2ETests } from './notifications_syncboard.e2e.test';
 import { runTenantSecurityRLSE2ETests } from './tenant_security_rls.e2e.test';
 
+import { ensureDefaultSubscriptionPlans } from '../helpers/seedPlans';
+
 export async function runAllE2ETests() {
   console.log('=============================================================');
   console.log('🧪 RUNNING COMPREHENSIVE END-TO-END (E2E) TEST SUITES: MyMall Backend');
   console.log('=============================================================');
 
+  await ensureDefaultSubscriptionPlans();
   await startTestServer();
 
   let totalPassed = 0;
