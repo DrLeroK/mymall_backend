@@ -45,7 +45,7 @@ npx prisma db push --skip-generate
 # 3. Optional automatic database seeding (Zero Data Loss Protected)
 if [ "$SEED_DATABASE" = "true" ]; then
   echo "==> [Docker Entrypoint] Running database seed check (initial deployment demo records)..."
-  npx ts-node --transpile-only prisma/seed.ts || echo "==> [Docker Entrypoint] Seeding finished or records already exist."
+  node dist/prisma/seed.js || echo "==> [Docker Entrypoint] Seeding finished or records already exist."
 fi
 
 echo "==> [Docker Entrypoint] Starting MyMall backend application server on port ${PORT:-5001}..."

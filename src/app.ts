@@ -7,6 +7,9 @@ import { apiLimiter } from './middleware/rateLimiter';
 
 const app = express();
 
+// Trust reverse proxy (Required for Render, Vercel, and Cloudflare load balancers)
+app.set('trust proxy', 1);
+
 // Security HTTP headers
 app.use(
   helmet({
